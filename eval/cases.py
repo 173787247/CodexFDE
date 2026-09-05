@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 
-from flowerp import ERPService, ERPStore, InventoryService, LedgerService, MasterDataService, SalesService
+from flowerp import ERPService, ERPStore, InventoryService, LedgerService, MasterDataService, ReportService, SalesService
 from flowerp.finance import FinanceService
 from flowerp.cash_management import CashManagementService
 from flowerp.channels import EcommerceChannelService
 from flowerp.import_export import ImportExportService
 from flowerp.identity import Principal, SYSTEM_PRINCIPAL
-from flowerp.models import ApprovalRequired, Conflict, InsufficientStock, InvalidTransition, OrderLine
+from flowerp.models import ApprovalRequired, Conflict, InsufficientStock, InvalidTransition, OrderLine, ValidationError
 from flowerp.operations import BackupService
 from flowerp.purchasing import PurchasingService
 from eval.progression import require_capability
@@ -22,6 +23,70 @@ def _service() -> tuple[tempfile.TemporaryDirectory, ERPService]:
     service = ERPService(ERPStore(Path(tmp.name) / "eval.db"))
     service.add_product("SKU-A", "验收商品", 1000, 2)
     return tmp, service
+
+
+def spec_contract_rejects_ambiguity() -> str:
+    from workbench.spec import REQUIRED_SECTIONS, parse_spec
+    valid = "\n\n".join(f"## {name}\n{name}：验收夹具" for name in REQUIRED_SECTIONS)
+    assert parse_spec(valid).goal == "目标：验收夹具"
+    example = valid.replace("验收用例：验收夹具", "验收用例：验收夹具\n```markdown\n## 未知章节\n```\n")
+    assert "## 未知章节" in parse_spec(example).acceptance
+    invalid = (
+        valid.replace("## 来源\n来源：验收夹具\n\n", ""),
+        valid.replace("目标：验收夹具", ""), valid + "\n## 目标\n重复",
+        valid.replace("## 来源", "## 未知"),
+        valid.replace("## 来源", "## 临时").replace("## 目标", "## 来源").replace("## 临时", "## 目标"),
+        valid + "\n```text\n未闭合",
+    )
+    for source in invalid:
+        try:
+            parse_spec(source)
+        except ValueError:
+            continue
+        raise AssertionError("不完整、歧义或错序的合同被放行")
+    return "六段结构完整且唯一；代码示例保留为正文，缺项/空白/重复/错序/未知章节均拒绝"
+
+
+def isolated_report_contract_is_honest() -> str:
+    from eval.report_contract import validate_report
+    valid = {"schema_version": "1.0", "suite": "blocking", "requested_cases": ["fixture"],
+             "summary": {"total": 1, "passed": 1, "blocking_failed": 0, "observing_failed": 0, "decision": "pass"},
+             "results": [{"name": "fixture", "level": "blocking", "passed": True}]}
+    validate_report(valid, ("fixture",), 0)
+    for report, code in ((valid, 1), ({**valid, "results": []}, 0),
+                         ({**valid, "requested_cases": ["other"]}, 0)):
+        try:
+            validate_report(report, ("fixture",), code)
+        except RuntimeError:
+            continue
+        raise AssertionError("报告与过程矛盾、空结果或替换用例未被拒绝")
+    return "隔离报告逐项对账，退出码矛盾、空用例与身份替换均拒绝"
+
+
+def bootstrap_evidence_is_honest() -> str:
+    from workbench import bootstrap
+    assert hasattr(bootstrap, "BootstrapLedger"), "L01 工作台任务与证据账能力尚未实现"
+    BootstrapLedger = bootstrap.BootstrapLedger
+    with tempfile.TemporaryDirectory(prefix="l01-eval-") as temporary:
+        root = Path(temporary)
+        ledger = BootstrapLedger(root / "data")
+        ledger.initialize("eval-fixture")
+        ledger.add_project("PERSONAL-WORKBENCH", "验收夹具")
+        spec = root / "spec.md"
+        spec.write_text("验收夹具：缺证据时失败", encoding="utf-8")
+        ledger.create_task("PERSONAL-WORKBENCH", "CASE-WB-L01-001", "验收证据账", str(spec), problem_file=str(spec))
+        assert not ledger.status(require_red_green_evidence=True)["ok"]
+        for phase, code, minute in (("red", 1, 0), ("diff", 0, 1), ("green", 0, 2)):
+            output = root / (phase + ".txt")
+            output.write_text("自动测试夹具，不是学生证据：" + phase, encoding="utf-8")
+            ledger.add_evidence("CASE-WB-L01-001", phase, "git diff" if phase == "diff" else "test same requirement",
+                                str(output), code, f"2026-09-05T00:{minute:02d}:00+00:00")
+        report = ledger.status("PERSONAL-WORKBENCH", "CASE-WB-L01-001", True)
+        assert report["ok"] and report["evidence_complete"]
+        assert not report["flowerp_connected"] and report["acceptance"] == "pending_human_review"
+        assert len(report["tasks"][0]["evidence"]) == 3
+        assert not ledger.status(require_task="missing")["ok"]
+        return "参考实现：缺证据失败、同案前红/Diff/后绿可定位，完整性检查不替代人审"
 
 
 def stock_never_negative() -> str:
@@ -52,22 +117,25 @@ def receiving_is_idempotent() -> str:
 
 def inventory_export_is_stable() -> str:
     require_capability("inventory_export")
-    tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-export-")
+    tmp, service = _service()
     try:
-        store = ERPStore(Path(tmp.name) / "eval.db")
-        from flowerp.identity import IdentityService
-        IdentityService(store).ensure_local_defaults()
-        master = MasterDataService(store); inventory = InventoryService(store)
-        second = master.create_product(SYSTEM_PRINCIPAL, "EXPORT-B", "导出商品 B", 2000, 1000)
-        first = master.create_product(SYSTEM_PRINCIPAL, "EXPORT-A", "导出商品 A", 1000, 500)
-        inventory.receive(SYSTEM_PRINCIPAL, second["id"], "LOC-MAIN-STOCK", 2, "export-b")
-        inventory.receive(SYSTEM_PRINCIPAL, first["id"], "LOC-MAIN-STOCK", 3, "export-a")
-        content = ImportExportService(store).export_csv(SYSTEM_PRINCIPAL, "inventory")
+        service.add_product("EXPORT-B", "导出商品 B", 2000, 1000)
+        service.add_product("EXPORT-A", "导出商品 A", 1000, 500)
+        service.receive_stock("EXPORT-B", 2, "export-b")
+        service.receive_stock("EXPORT-A", 3, "export-a")
+        content = service.export_inventory()
         lines = (content[1:] if content.startswith("\ufeff") else content).splitlines()
         assert lines[0] == "sku,name,site,location,lot_id,on_hand,reserved,available"
         assert lines[1].startswith("EXPORT-A,") and lines[2].startswith("EXPORT-B,")
         assert lines[1].endswith(",3,0,3") and lines[2].endswith(",2,0,2")
-        return "库存导出字段固定、按 SKU 排序且 available 与权威库存一致"
+        assert service.product("EXPORT-A")["available"] == 3
+        assert service.product("EXPORT-B")["available"] == 2
+        from flowerp.identity import IdentityService
+        IdentityService(service.store).ensure_local_defaults()
+        v2 = ImportExportService(service.store).export_csv(SYSTEM_PRINCIPAL, "inventory")
+        v2_lines = (v2[1:] if v2.startswith("\ufeff") else v2).splitlines()
+        assert any(line.startswith("EXPORT-A,") and line.endswith(",3,0,3") for line in v2_lines)
+        return "库存导出字段固定、按 SKU 排序，且门面/导出/v2 账本的 available 是同一个数"
     finally:
         tmp.cleanup()
 
@@ -126,7 +194,14 @@ def purchase_request_preserves_reason() -> str:
         else:
             raise AssertionError("零数量采购申请未被拒绝")
         assert all(item["id"] != "PR-EVAL-INVALID" for item in service.list_purchases())
-        return "采购申请保留 SKU、数量、原因和稳定身份，无效数量没有部分写入"
+        try:
+            service.propose_purchase("SKU-A", 2, "  ", "PR-EVAL-NO-REASON")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("空白采购原因未被拒绝")
+        assert all(item["id"] != "PR-EVAL-NO-REASON" for item in service.list_purchases())
+        return "采购申请保留 SKU、数量、原因和稳定身份，无效数量或空白原因没有部分写入"
     finally:
         tmp.cleanup()
 
@@ -176,6 +251,167 @@ def ecommerce_channel_order_is_idempotent_and_guarded() -> str:
         tmp.cleanup()
 
 
+def channel_callback_lease_is_exclusive_and_bounded() -> str:
+    tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-callback-lease-")
+    try:
+        store = ERPStore(Path(tmp.name) / "eval.db")
+        from flowerp.identity import IdentityService
+        IdentityService(store).ensure_local_defaults()
+        master = MasterDataService(store); channels = EcommerceChannelService(store)
+        product = master.create_product(SYSTEM_PRINCIPAL, "EVAL-CALLBACK", "回传验收商品", 1000, 500)
+        customer = master.create_customer(
+            SYSTEM_PRINCIPAL, "EVAL-CALLBACK-PLATFORM", "回传平台客户", credit_limit_cents=100000,
+        )
+        shop = channels.create_shop(
+            SYSTEM_PRINCIPAL, "mock", "EVAL-CALLBACK-SHOP", "回传验收店",
+            customer["id"], "SITE-MAIN", "eval-callback-shop",
+        )
+        channels.map_listing(
+            SYSTEM_PRINCIPAL, shop["id"], "item-callback", "sku-callback", "回传验收商品",
+            [{"product_id": product["id"], "quantity": 1, "revenue_share_basis_points": 10000}],
+        )
+        payload = {
+            "external_order_id": "EVAL-CALLBACK-ORDER-1", "external_status": "paid",
+            "order_time": "2026-08-31T10:00:00+08:00", "currency": "CNY",
+            "goods_cents": 1000, "total_cents": 1000, "recipient": "验收员",
+            "phone": "13800138000", "province": "上海市", "city": "上海市", "street": "回传路 1 号",
+            "lines": [{"external_line_id": "1", "external_product_id": "item-callback",
+                       "external_sku_id": "sku-callback", "quantity": 1,
+                       "unit_price_cents": 1000, "total_cents": 1000}],
+        }
+        order = channels.ingest_orders(SYSTEM_PRINCIPAL, shop["id"], [payload])["items"][0]
+        channels.cancel_order(SYSTEM_PRINCIPAL, order["id"], "验收取消")
+        claimed = channels.claim_callbacks(SYSTEM_PRINCIPAL, "eval-worker-a", limit=1, lease_seconds=60)
+        assert len(claimed) == 1 and claimed[0]["status"] == "processing"
+        assert claimed[0]["attempts"] == 1 and claimed[0]["processing_owner"] == "eval-worker-a"
+        assert channels.claim_callbacks(SYSTEM_PRINCIPAL, "eval-worker-b", limit=1) == []
+        try:
+            channels.complete_callback(SYSTEM_PRINCIPAL, claimed[0]["id"], True, worker_id="eval-worker-b")
+        except Conflict:
+            pass
+        else:
+            raise AssertionError("非租约持有者确认了渠道回传")
+        failed = channels.complete_callback(
+            SYSTEM_PRINCIPAL, claimed[0]["id"], False, "platform throttled", "eval-worker-a",
+        )
+        assert failed["status"] == "failed" and failed["last_error"] == "platform throttled"
+        assert failed["available_at"] > failed["created_at"]
+        assert channels.claim_callbacks(SYSTEM_PRINCIPAL, "eval-worker-b", limit=1) == []
+        return "渠道回传仅允许一个具名 Worker 持有租约；越权确认被阻断，失败保留证据并进入有界退避"
+    finally:
+        tmp.cleanup()
+
+
+def ci_evidence_envelope_is_honest() -> str:
+    import os
+    import tempfile
+    from workbench.ci_evidence import build_envelope
+
+    tmp = tempfile.TemporaryDirectory(prefix="ci-evidence-")
+    try:
+        report = Path(tmp.name) / "harness-blocking.json"
+        report.write_text('{"suite":"blocking","summary":{"decision":"block"}}', encoding="utf-8")
+        try:
+            build_envelope(report, env={})
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("缺少 Run 身份仍生成了 Evidence Envelope")
+        missing = Path(tmp.name) / "missing.json"
+        try:
+            build_envelope(missing, env={"GITHUB_SHA": "abc", "GITHUB_RUN_ID": "1"})
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("报告不存在仍生成了信封")
+        envelope = build_envelope(
+            report, env={"GITHUB_SHA": "abc123", "GITHUB_RUN_ID": "77", "GITHUB_WORKFLOW": "FlowERP Eval Gate"},
+        )
+        assert envelope["commit_sha"] == "abc123" and envelope["run_id"] == "77"
+        assert envelope["report_decision"] == "block" and len(envelope["report_sha256"]) == 64
+        return "CI 信封绑定提交与 Run；缺报告或缺身份不得假装成功"
+    finally:
+        tmp.cleanup()
+
+
+def write_sets_reject_conflict() -> str:
+    from agent.schedule import Subtask, assert_parallel_safe, conflict_pairs
+
+    conflicts = conflict_pairs((
+        Subtask("impl", ("flowerp/purchasing.py",)),
+        Subtask("tests", ("flowerp/purchasing.py", "tests/test_flowerp.py")),
+    ))
+    assert conflicts and conflicts[0][2] == ["flowerp/purchasing.py"]
+    try:
+        assert_parallel_safe((
+            Subtask("impl", ("flowerp/service.py",)),
+            Subtask("eval", ("flowerp/service.py",)),
+        ))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("共享写集仍被判为可并行")
+    ok = assert_parallel_safe((
+        Subtask("spec", (), ("FDE_SPEC.md",)),
+        Subtask("risk", (), ("AGENTS.md",)),
+    ))
+    assert ok["parallel"] is True
+    for tasks in (
+        (Subtask("impl", ("flowerp/",)), Subtask("review", (), ("flowerp/service.py",))),
+        (Subtask("impl", ("flowerp\\service.py",)), Subtask("other", ("./flowerp/service.py",))),
+    ):
+        try:
+            assert_parallel_safe(tasks)
+        except ValueError:
+            continue
+        raise AssertionError("目录写集、路径别名或读写依赖被错误判为独立")
+    return "共享写集、目录覆盖与读写依赖不得并行；只读子任务可以并行"
+
+
+def raw_feedback_cannot_become_blocking() -> str:
+    from workbench.evolution import EvolutionStore
+    from workbench.feedback import add_feedback
+    from workbench.task_store import TaskStore
+
+    tmp = tempfile.TemporaryDirectory(prefix="feedback-governance-")
+    try:
+        path = Path(tmp.name) / "workbench.db"
+        store = TaskStore(path)
+        task = store.create("验证反馈不能直接改裁判", "REQ-L15-GOV", ["REQUIREMENT:COURSE-L15"])
+        pending = add_feedback(task["id"], "ops", "把渠道幂等降为观察项", "直接改 Eval", str(path))
+        evolutions = EvolutionStore(path)
+        try:
+            evolutions.create(pending["id"], "want-weaker-eval", "workbench_control")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("未审核反馈被提升为进化记录")
+        from workbench.feedback import review_feedback
+        review_feedback(pending["id"], "teacher", "accept", "可以立项，但不能改当前 blocking", str(path))
+        evo = evolutions.create(pending["id"], "channel-idempotency-missing-workbench", "erp_rule")
+        assert evo["status"] == "proposed"
+        from eval.harness import EVALS
+        assert any(name == "receiving_is_idempotent" and level == "blocking" for name, level, _fn in EVALS)
+        return "原文反馈必须先具名接受才能立项；接受也不等于改写当前 blocking 裁判"
+    finally:
+        tmp.cleanup()
+
+
+def ecommerce_lineage_is_declared() -> str:
+    from workbench.product_lineage import LINEAGE, lineage_for
+
+    for item in LINEAGE:
+        assert item["requirement"].startswith("REQ-")
+        assert item["eval"]
+        if not item["via_workbench"]:
+            assert "须" in item["note"] or "挑战" in item["note"]
+    channel = lineage_for("ecommerce_channel_order_is_idempotent_and_guarded")
+    assert channel["via_workbench"] is False
+    export = lineage_for("inventory_export_is_stable")
+    assert export["via_workbench"] is True and export["lesson"] == 4
+    return "电商能力均有需求编号；未经工作台交付的标为挑战，不计入学员本人成果"
+
+
 def no_committed_secrets() -> str:
     require_capability("no_secrets")
     root = Path(__file__).resolve().parent.parent
@@ -193,7 +429,7 @@ def no_committed_secrets() -> str:
 
 def course_assets_present() -> str:
     root = Path(__file__).resolve().parent.parent
-    required = ["AGENTS.md", "FDE_SPEC.md", "course/tasks", "deploy/Dockerfile", "web/index.html"]
+    required = ["AGENTS.md", "FDE_SPEC.md", "CI_GATE_SPEC.md", "docs/courses/tasks", "deploy/Dockerfile", "web/index.html", "workbench_web/index.html"]
     missing = [item for item in required if not (root / item).exists()]
     assert not missing, f"课程资产待补齐：{missing}"
     return "关键课程资产齐备"
@@ -325,6 +561,60 @@ def purchase_invoice_three_way_match() -> str:
         tmp.cleanup()
 
 
+def payable_aging_tracks_open_supplier_exposure() -> str:
+    tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-ap-aging-")
+    try:
+        store = ERPStore(Path(tmp.name) / "eval.db")
+        from flowerp.identity import IdentityService
+        IdentityService(store).ensure_local_defaults()
+        buyer = Principal("eval-ap-buyer", "ORG-DEFAULT", "buyer", "采购制单", SYSTEM_PRINCIPAL.permissions)
+        approver = Principal("eval-ap-approver", "ORG-DEFAULT", "approver", "采购审批", SYSTEM_PRINCIPAL.permissions)
+        master = MasterDataService(store); purchasing = PurchasingService(store)
+        finance = FinanceService(store); reports = ReportService(store)
+        product = master.create_product(SYSTEM_PRINCIPAL, "EVAL-AP", "应付账龄验收商品", 10_000, 6_000)
+        supplier = master.create_supplier(SYSTEM_PRINCIPAL, "EVAL-AP-SUP", "应付账龄验收供应商")
+
+        def payable(due_offset: int, reference: str) -> dict:
+            order = purchasing.create_order(
+                buyer, supplier["id"], "SITE-MAIN",
+                [{"product_id": product["id"], "quantity": 2, "unit_price_cents": 6_000}],
+            )
+            purchasing.submit(buyer, order["id"]); purchasing.approve(approver, order["id"])
+            line_id = purchasing.order(SYSTEM_PRINCIPAL, order["id"])["lines"][0]["id"]
+            receipt = purchasing.create_receipt(
+                SYSTEM_PRINCIPAL, order["id"], "LOC-MAIN-STOCK",
+                [{"purchase_line_id": line_id, "accepted_quantity": 2}],
+            )
+            purchasing.post_receipt(SYSTEM_PRINCIPAL, receipt["id"], f"eval-ap-{reference}")
+            due = date.today() + timedelta(days=due_offset)
+            return finance.create_invoice_from_purchase(
+                SYSTEM_PRINCIPAL, order["id"],
+                invoice_date=(due - timedelta(days=30)).isoformat(), due_date=due.isoformat(),
+                supplier_invoice_number=reference,
+            )
+
+        current = payable(5, "EVAL-AP-CURRENT")
+        overdue = payable(-20, "EVAL-AP-OVERDUE")
+        allocated = overdue["total_cents"] // 2
+        finance.record_payment(
+            SYSTEM_PRINCIPAL, "disbursement", "supplier", supplier["id"], allocated,
+            allocations=[{"invoice_id": overdue["id"], "amount_cents": allocated}],
+        )
+        aging = reports.ap_aging(SYSTEM_PRINCIPAL, date.today().isoformat())
+        assert aging["buckets"]["current"] == current["total_cents"], aging
+        assert aging["buckets"]["1_30"] == overdue["total_cents"] - allocated, aging
+        assert aging["overdue_cents"] == reports.dashboard(SYSTEM_PRINCIPAL)["overdue_payable_cents"]
+        try:
+            reports.ap_aging(SYSTEM_PRINCIPAL, "2026-02-30")
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("无效应付账龄日期未被拒绝")
+        return "应付账龄按到期日分桶，部分付款只保留未结余额，并与驾驶舱逾期应付一致"
+    finally:
+        tmp.cleanup()
+
+
 def double_entry_fifo_and_subledger_reconciliation() -> str:
     tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-ledger-")
     try:
@@ -430,6 +720,24 @@ def delivery_evidence_and_review_controls() -> str:
             raise AssertionError("任务能够在没有具名审核时完成")
         delivery = store.review(task["id"], "delivery-reviewer", "approve", "阻断证据完整")
         assert delivery["status"] == "completed" and delivery["reviewed_by"] == "delivery-reviewer"
+        failure_automation = DeliveryAutomation(store, tmp.name, max_attempts=1, suite_runner=lambda *_args, **_kwargs: {
+            "summary": {"decision": "block", "blocking_failed": 1},
+            "results": [{"name": "observed_failure", "level": "blocking", "passed": False,
+                         "evidence": "稳定失败"}],
+        })
+        failed_task = failure_automation.submit(
+            "验证自动失败进入待审反馈", "REQ-EVAL-FAILURE-OBSERVATION", ["SKU:NOTEBOOK-AI"],
+            actor="eval-requester",
+        )
+        failed_task = failure_automation.wait(failed_task["id"])
+        assert failed_task["status"] == "rework"
+        automatic_feedback = next(
+            item for item in feedback_summary(str(path))["items"]
+            if item["task_id"] == failed_task["id"]
+        )
+        assert automatic_feedback["status"] == "pending_review"
+        assert automatic_feedback["source"] == "automation:rework"
+        assert automatic_feedback["evidence"]["blocking_failures"] == ["observed_failure"]
         feedback = add_feedback(task["id"], "eval", "证据待确认", "人工复核", str(path))
         assert feedback["status"] == "pending_review"
         reviewed = review_feedback(feedback["id"], "eval-reviewer", "accept", "证据有效", str(path))
@@ -440,10 +748,72 @@ def delivery_evidence_and_review_controls() -> str:
             pass
         else:
             raise AssertionError("已审核反馈仍可重复改变结论")
-        assert feedback_summary(str(path))["pending_review"] == 0
-        return "需求自动生成任务级 Spec 并推进至审核；完成需要具名审核；反馈默认待审且审核后不可重复改写"
+        final_feedback = feedback_summary(str(path))
+        assert final_feedback["pending_review"] == 1 and final_feedback["accepted"] == 1
+        from eval.task_api_contract import check_task_api, check_required_workbench
+        check_task_api(Path(tmp.name) / "api-contract")
+        check_required_workbench(Path(tmp.name) / "required-workbench")
+        return "需求自动生成 Spec 并推进至审核；失败自动沉淀为幂等待审反馈；完成与反馈提升均保留具名人审"
     finally:
         tmp.cleanup()
+
+
+def plugin_lifecycle_is_reversible() -> str:
+    from workbench.plugin_runtime import PluginActivationError, PluginContract, PluginRuntime
+
+    trace: list[str] = []
+    runtime = PluginRuntime("EVAL-PLUGIN-LIFECYCLE")
+
+    def provider(name: str, *, fail: bool = False):
+        def start(ctx, _config):
+            trace.append(f"start:{name}")
+            ctx.effect(lambda: lambda: trace.append(f"stop:{name}"), f"resource:{name}")
+            if fail:
+                raise RuntimeError("intentional activation failure")
+            return name
+
+        return start
+
+    def consumer(ctx, _config):
+        current = str(ctx.service("engine"))
+        trace.append(f"start:consumer:{current}")
+        ctx.on("probe", lambda value: trace.append(f"event:{value}"))
+        ctx.effect(lambda: lambda: trace.append("stop:consumer"), "consumer-resource")
+        return current
+
+    runtime.register(PluginContract(
+        "engine.a", frozenset({"engine"}), frozenset(), provider("a"),
+    ))
+    runtime.register(PluginContract(
+        "engine.b", frozenset({"engine"}), frozenset(), provider("b"),
+    ))
+    runtime.register(PluginContract(
+        "engine.broken", frozenset({"engine"}), frozenset(), provider("broken", fail=True),
+    ))
+    runtime.register(PluginContract(
+        "consumer", frozenset({"consumer"}), frozenset({"engine"}), consumer,
+    ))
+
+    runtime.reconcile(["engine.a", "consumer"])
+    runtime.reconcile(["engine.b", "consumer"])
+    assert runtime.service("consumer") == "b"
+    assert trace[:6] == [
+        "start:a", "start:consumer:a", "stop:consumer", "stop:a", "start:b", "start:consumer:b",
+    ]
+    try:
+        runtime.reconcile(["engine.broken", "consumer"])
+    except PluginActivationError:
+        pass
+    else:
+        raise AssertionError("损坏 Provider 激活失败后仍被接受")
+    assert runtime.service("engine") == "b" and runtime.service("consumer") == "b"
+    assert "start:broken" in trace and "stop:broken" in trace
+    runtime.events.emit("probe", "before-shutdown")
+    assert trace.count("event:before-shutdown") == 1
+    runtime.shutdown()
+    runtime.events.emit("probe", "after-shutdown")
+    assert "event:after-shutdown" not in trace and runtime.events.listener_count() == 0
+    return "Provider 按依赖逆序卸载并重载；失败副作用被清理、旧组合恢复，监听器无残留"
 
 
 def web_api_and_persistence_projection_agree() -> str:
@@ -455,10 +825,35 @@ def web_api_and_persistence_projection_agree() -> str:
     try:
         runtime = Path(tmp.name)
         app = App(runtime)
-        assert app.tasks is None
-        assert not (runtime / "workbench.db").exists()
-        moved = app.api.dispatch("GET", "/api/v1/tasks?limit=100", {}, None, "127.0.0.1")
-        assert moved.status == 410
+        assert app.tasks is not None
+        assert (runtime / "workbench.db").exists()
+        course_task = app.tasks.create(
+            "验证课程 Web 投影权威任务状态", "REQ-EVAL-WEB-COURSE-001", ["REQUIREMENT:EVAL-WEB"],
+        )
+        course_response = app.api.dispatch("GET", "/api/v1/tasks?limit=100", {}, None, "127.0.0.1")
+        assert course_response.status == 200
+        api_course_task = next(
+            item for item in course_response.body["items"] if item["id"] == course_task["id"]
+        )
+        with app.tasks.connect() as connection:
+            persisted_course_status = connection.execute(
+                "SELECT status FROM tasks WHERE id=?", (course_task["id"],)
+            ).fetchone()["status"]
+        assert api_course_task["status"] == course_task["status"] == persisted_course_status == "queued"
+        course_view = app.api.dispatch(
+            "GET", f"/api/v1/delivery/views/{course_task['id']}", {}, None, "127.0.0.1",
+        )
+        assert course_view.status == 200
+        assert course_view.body["schema"] == "workbench.delivery-view/v1"
+        assert course_view.body["status"]["code"] == persisted_course_status
+        assert course_view.body["status"]["next_action"]
+        # Read again after a persisted failure: a fixed queued/green projection is invalid.
+        app.tasks.transition(course_task["id"], "failed", "投影失败状态探针", error="可复现失败")
+        failure_view = app.api.dispatch(
+            "GET", f"/api/v1/delivery/views/{course_task['id']}", {}, None, "127.0.0.1",
+        )
+        assert failure_view.status == 200 and failure_view.body["status"]["code"] == "failed"
+        assert TaskStore(runtime / "workbench.db").get(course_task["id"])["status"] == "failed"
 
         harness = HarnessPlatformAPI(runtime / "harness", Path(__file__).resolve().parent.parent)
         task = harness.tasks.create(
@@ -472,6 +867,10 @@ def web_api_and_persistence_projection_agree() -> str:
                 "SELECT status FROM tasks WHERE id=?", (task["id"],)
             ).fetchone()["status"]
         assert api_task["status"] == task["status"] == persisted_status == "queued"
+        harness_view = harness.dispatch("GET", f"/api/v1/delivery/views/{task['id']}", {}, {})
+        assert harness_view.status == 200
+        assert harness_view.body["schema"] == course_view.body["schema"]
+        assert harness_view.body["status"]["code"] == persisted_status
         assert (runtime / "harness/tasks.db").is_file()
         assert not (runtime / "harness/flowerp.db").exists()
 
@@ -486,11 +885,23 @@ def web_api_and_persistence_projection_agree() -> str:
 
         web_source = (Path(__file__).resolve().parent.parent / "web" / "app.js").read_text(encoding="utf-8")
         assert 'api("/api/v1/products?limit=500")' in web_source
-        erp_shell = (Path(__file__).resolve().parent.parent / "web" / "index.html").read_text(encoding="utf-8")
+        assert 'api("/api/v1/delivery/views?limit=100")' in web_source
+        assert 'delivery:"交付证据"' in web_source
+        root = Path(__file__).resolve().parent.parent
+        erp_shell = (root / "web" / "index.html").read_text(encoding="utf-8")
+        assert 'href="#delivery"' in erp_shell
+        assert 'href="http://127.0.0.1:8001"' in erp_shell
+        assert "客户项目" in erp_shell
         assert 'href="http://127.0.0.1:8010"' in erp_shell
-        harness_source = (Path(__file__).resolve().parent.parent / "harness_web" / "app.js").read_text(encoding="utf-8")
-        assert 'api("/api/v1/tasks?limit=200")' in harness_source
-        assert 'api("/api/v1/course/status")' in harness_source
-        return "Harness Web/Task SQLite 与 FlowERP Web/ERP SQLite 分别对账，且两套运行数据库物理隔离"
+        cockpit = (root / "workbench_web" / "index.html").read_text(encoding="utf-8")
+        assert "个人研发工作台" in cockpit and "客户项目" in cockpit
+        from workbench.workbench_server import WorkbenchApp
+        workbench = WorkbenchApp(runtime / "workbench-surface")
+        health = workbench.health()
+        assert health["surface"] == "workbench" and health["database"].endswith("workbench.db")
+        harness_source = (root / "harness_web" / "app.js").read_text(encoding="utf-8")
+        assert 'api("/api/v1/delivery/views?limit=200")' in harness_source
+        assert 'api("/api/v1/course/status"' in harness_source
+        return "工作台 :8001 与客户项目 FlowERP :8000 分面；Task API/SQLite 和 ERP 权威状态可对账"
     finally:
         tmp.cleanup()

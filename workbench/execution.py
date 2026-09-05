@@ -35,7 +35,7 @@ def normalize_write_scope(values: list[str] | tuple[str, ...] | None) -> list[st
     """Return safe, workspace-relative paths suitable for a task allowlist."""
     normalized: list[str] = []
     for raw in values or []:
-        value = str(raw).strip().replace("\\", "/").strip("/")
+        value = str(raw).strip().replace("\\", "/")
         if not value:
             continue
         path = PurePosixPath(value)
@@ -420,8 +420,10 @@ class CodexExecutionRunner:
             "你是 FlowERP 研发交付执行器。读取仓库 AGENTS.md 并完成下面的任务。\n"
             "必须先理解 Spec，再做最小代码修改，再运行与改动相关的测试。\n"
             f"只允许修改这些相对路径：{', '.join(scopes)}。不得修改其他路径。\n"
-            "不得写入 .runtime、.tmp、.git、.codex、.env、数据库、密钥或凭据文件；"
+            "不得直接写入 .runtime、.tmp、.git、.codex、.env、现有运行数据库、密钥或凭据文件；"
             "不得批准业务单据，不得删除或降低 Eval。\n"
+            "可以运行测试，在系统 tempfile 目录中创建独立的测试数据库；不得连接或修改现有业务数据库。"
+            "真实任务与审核证据由外层工作台记录，不要自行编造或写入运行账本。\n"
             "如果需求无法在写入范围内安全完成，停止修改并在 risks 中说明。\n"
             "最终必须按给定 JSON Schema 返回摘要、实际测试、剩余风险和下一步。\n\n"
             "任务上下文：\n" + json.dumps(payload, ensure_ascii=False, indent=2)
