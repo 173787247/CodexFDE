@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +20,7 @@ from flowerp.seed import load_ecommerce_sample
 from flowerp.config import load_settings
 from flowerp.operations import RuntimeCoordinator
 from .api_v2 import APIRouter
+from .http_bind import create_http_server
 from .task_store import TaskStore
 from .workflow import run_task
 
@@ -40,12 +41,14 @@ def _structured_log(record: dict) -> None:
 
 class App:
     def __init__(self, runtime_dir: str | Path = ".runtime", *,
-                 enable_legacy_workbench: bool = False) -> None:
+                 enable_legacy_workbench: bool = True) -> None:
         runtime = Path(runtime_dir)
         self.settings = load_settings(runtime)
         self.store = ERPStore(runtime / "flowerp.db", self.settings.database_busy_timeout_ms)
-        # The course V0 data model is physically isolated from the production
-        # ledger. It can never mutate /api/v1 balances or documents.
+        # The course delivery projection is required by the L14 mainline, but
+        # remains physically isolated from the production ledger. It can never
+        # mutate /api/v1 balances or documents. The full Harness cockpit still
+        # runs independently from harness_web/.
         self.erp = ERPService(ERPStore(runtime / "flowerp-course.db", self.settings.database_busy_timeout_ms))
         self.tasks = TaskStore(runtime / "workbench.db") if enable_legacy_workbench else None
         self.api = APIRouter(
@@ -225,7 +228,16 @@ def serve(host: str = "127.0.0.1", port: int = 8000, runtime_dir: str = ".runtim
     app = App(runtime_dir)
     if host == "127.0.0.1" and app.settings.host != "127.0.0.1": host = app.settings.host
     if port == 8000 and app.settings.port != 8000: port = app.settings.port
-    server = ThreadingHTTPServer((host, port), make_handler(app))
+    server = create_http_server(
+        host,
+        port,
+        make_handler(app),
+        service_name="FlowERP",
+        retry_command=(
+            "python .\\main.py --port 8080  "
+            "（等价：python -X utf8 -m workbench.cli serve --port 8080）"
+        ),
+    )
     server.daemon_threads = False
     coordinator = RuntimeCoordinator(app.store)
     owner_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -247,7 +259,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000, runtime_dir: str = ".runtim
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     if threading.current_thread() is threading.main_thread():
-        for name in ("SIGINT", "SIGTERM"):
+        for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             if hasattr(signal, name): signal.signal(getattr(signal, name), request_shutdown)
     _structured_log({"level": "INFO", "event": "server_started", "url": f"http://{host}:{port}",
                      "instance_id": owner_id, "fencing_token": lease["fencing_token"]})
