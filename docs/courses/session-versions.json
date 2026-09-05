@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "lessons": {
+    "13": {
+      "name": "L13 · 工作台任务受理修订版（2026-09-05）",
+      "ref": "course/session/l13-20260905",
+      "commit": "8f0a33a2aa357cc717f5115d9277e9a42bb80e9b",
+      "validation": "维护演练已验证执行前失败、真实范围内修改、执行后通过；不代表学生学习证据或具名终审。",
+      "evidence_task": "TASK-B3832E419E"
+    }
+  }
+}
