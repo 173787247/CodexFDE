@@ -63,22 +63,11 @@ def _personal_contract():
     from .cases import tests
     return tests('tests.test_report_contract')
 
+EVALS = [('personal_harness_contract','blocking',_personal_contract)]
+PROJECT_CASES = {'receiving_is_idempotent': _receiving}
+
 from .ci_business_gate import check as _customer_atomic
-EVALS = [('personal_harness_contract','blocking',_personal_contract)]
 EVALS.append(('sales_credit_and_atomic_reservation','blocking',_customer_atomic))
-PROJECT_CASES = {'receiving_is_idempotent': _receiving}
-
-# Current personal registry. Later lessons append their own frozen checks.
-def _receiving():
-    from .cases import receiving_is_idempotent
-    return receiving_is_idempotent()
-
-def _personal_contract():
-    from .cases import tests
-    return tests('tests.test_report_contract')
-
-EVALS = [('personal_harness_contract','blocking',_personal_contract)]
-PROJECT_CASES = {'receiving_is_idempotent': _receiving}
 
 def main(argv=None):
     import argparse
