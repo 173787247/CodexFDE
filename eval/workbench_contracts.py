@@ -83,9 +83,25 @@ class LocalDeliveryFixture:
     def call(self, item, action, *args, actor='fixture-requester'):
         return getattr(self.service, action)(item['id'], actor, self.state(item)['revision'], *args)
 
-    def wait(self, item):
-        self.service.workers[item['id']].join(30)
-        assert not self.service.workers[item['id']].is_alive(), 'Local contract delivery did not finish'
+    def wait(self, item, *, idle_timeout=30, total_timeout=180):
+        """Bound the whole fixture and stop on thirty seconds without progress."""
+        worker = self.service.workers[item['id']]
+        deadline = time.monotonic() + total_timeout
+        idle_deadline = time.monotonic() + idle_timeout
+        previous = None
+        while worker.is_alive():
+            work = self.service._load(item['id'])
+            task = self.tasks.get(work['active_task_id']) if work.get('active_task_id') else None
+            progress = (work['revision'], task['version'] if task else None,
+                        len(task.get('events', [])) if task else 0)
+            if progress != previous:
+                previous = progress
+                idle_deadline = time.monotonic() + idle_timeout
+            remaining = min(deadline, idle_deadline) - time.monotonic()
+            if remaining <= 0:
+                break
+            worker.join(min(.25, remaining))
+        assert not worker.is_alive(), 'Local contract delivery did not finish within its bounded progress deadline'
         return self.state(item)
 
     def prepare(self, item, *, trials=False, choices=None):

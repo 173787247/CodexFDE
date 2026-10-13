@@ -107,6 +107,47 @@ class FileReadTests(unittest.TestCase):
         self.assertEqual('真实证据', self.path.read_text(encoding='utf-8'))
         self.assertEqual([self.path], list(self.path.parent.iterdir()))
 
+    def test_partial_binary_write_preserves_original_file(self):
+        original = Path.write_bytes
+        before = self.path.read_bytes()
+        def short_write(target, data):
+            original(target, data[:2])
+            return 2
+        with patch.object(Path, 'write_bytes', short_write):
+            with self.assertRaisesRegex(OSError, '未完整写入'):
+                file_io.atomic_write_bytes(self.path, b'complete candidate')
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual([self.path], list(self.path.parent.iterdir()))
+
+    def test_binary_replace_retry_preserves_concurrent_external_edit(self):
+        def check_current():
+            if self.path.read_text(encoding='utf-8') != '真实证据':
+                raise ValueError('concurrent edit')
+        def busy_replace(source, target):
+            self.path.write_text('外部修改', encoding='utf-8')
+            raise PermissionError('temporary sharing denial')
+        with patch.object(file_io, '_WINDOWS', True), patch.object(Path, 'replace', busy_replace):
+            with self.assertRaisesRegex(ValueError, 'concurrent edit'):
+                file_io.atomic_write_bytes(self.path, b'candidate', before_replace=check_current)
+        self.assertEqual('外部修改', self.path.read_text(encoding='utf-8'))
+        self.assertEqual([self.path], list(self.path.parent.iterdir()))
+
+    def test_atomic_binary_replace_keeps_existing_file_mode(self):
+        self.path.chmod(0o640)
+        mode = self.path.stat().st_mode
+        file_io.atomic_write_bytes(self.path, b'complete replacement')
+        self.assertEqual(mode, self.path.stat().st_mode)
+        self.assertEqual(b'complete replacement', self.path.read_bytes())
+
+    def test_failed_temporary_cleanup_does_not_hide_binary_write_failure(self):
+        def fail_write(target, data):
+            raise OSError('original write failure')
+        with patch.object(Path, 'write_bytes', fail_write), \
+                patch.object(Path, 'unlink', side_effect=PermissionError('cleanup failure')):
+            with self.assertRaisesRegex(OSError, 'original write failure'):
+                file_io.atomic_write_bytes(self.path, b'candidate')
+        self.assertEqual('真实证据', self.path.read_text(encoding='utf-8'))
+
 
 if __name__ == '__main__':
     unittest.main()

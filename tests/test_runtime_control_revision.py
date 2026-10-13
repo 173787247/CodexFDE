@@ -73,8 +73,19 @@ class RuntimeControlRevisionTests(unittest.TestCase):
         try:
             with patch.object(worker_type, 'completion_gate', gate), \
                     patch('workbench.execution.spawn_owned_process', side_effect=spawn):
-                deadline = time.monotonic() + 10
                 self.f.start()
+                # Frozen snapshots, pre-Eval and each child snapshot precede CLI
+                # startup. Bound their preparation separately; the actual CLI
+                # readiness and stop deadlines remain ten and five seconds.
+                preparation_deadline = time.monotonic() + 60
+                while len(cli) < 2:
+                    state = self.f.runtime._load(self.f.item['id'])
+                    if state['state'] in {'failed', 'cancelled', 'paused'}:
+                        self.fail('control fixture preparation failed: ' + state.get('error', ''))
+                    if time.monotonic() >= preparation_deadline:
+                        self.fail('real control fixture snapshots did not prepare two CLIs')
+                    time.sleep(.01)
+                deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     with worker_type.ready_lock:
                         if worker_type.ready == {'a.txt', 'b.txt'}:

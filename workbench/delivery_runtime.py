@@ -128,17 +128,17 @@ class DeliveryRuntime:
         if data.get('session_id'):
             self.sessions.append(data['session_id'], kind, actor, payload)
 
-    def _candidate_hash(self, data):
+    def _candidate_hash(self, data, *, record_process=True):
         workspace = data.get('workspace')
         target = resolve_reference(workspace, self.runtime) if workspace else None
-        return _digest(manifest(target, self.runtime)) if target and target.is_dir() else ''
+        return _digest(manifest(target, self.runtime, record_process=record_process)) if target and target.is_dir() else ''
 
     def view(self, item_id, *, include_candidate=True):
         with self.lock:
             data = self._load(item_id)
             if data.get('started_at') and data['state'] in {'running', 'queued', 'pausing', 'cancelling', 'awaiting_approval'}:
                 data['budget']['elapsed_seconds'] = int(max(0, time.time() - data['started_at']))
-            data['candidate_sha256'] = self._candidate_hash(data) if include_candidate else ''
+            data['candidate_sha256'] = self._candidate_hash(data, record_process=False) if include_candidate else ''
             data['candidate_verification'] = ('verified' if data['candidate_sha256'] else 'unavailable') if include_candidate else 'pending'
             with self.tasks.connect() as db:
                 approvals = db.execute('SELECT id,status,payload FROM delivery_tool_approvals WHERE run_id=? ORDER BY rowid', (data['run_id'],)).fetchall()

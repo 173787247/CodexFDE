@@ -73,7 +73,7 @@ def prepare(runtime, workspace, project, task_id, item_id, actor):
             'config_sha256': config_sha256, 'actor': actor, 'prepared_at': binding['prepared_at']}
 
 
-def view(package, workspace, task_id):
+def view(package, workspace, task_id, *, snapshot=None):
     if not package:
         return {'status': 'not_prepared', 'trust': 'unknown', 'runs': []}
     result = dict(package, status='prepared', trust='unknown', runs=[])
@@ -104,7 +104,8 @@ def view(package, workspace, task_id):
             # Report freshness uses the same candidate/source check as manual Eval.
             if run.get('report'):
                 from .eval_harness import report_view
-                run['freshness'] = report_view(run['report'], workspace, json.loads(checked_files['binding.json'].decode('utf-8'))['runtime'])['freshness']
+                run['freshness'] = report_view(run['report'], workspace,
+                    json.loads(checked_files['binding.json'].decode('utf-8'))['runtime'], snapshot=snapshot)['freshness']
             result['runs'].append(run)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result.update(status='unavailable', error=str(error))

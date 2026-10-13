@@ -27,6 +27,24 @@ function setup() {
 }
 function workflow(id='I1') {return {id,revision:4,stage:'review',enabled:true,messages:[],iterations:[],documents:[],progress:[],project:{id:'P1',deployment_profiles:[]},task:{id:'TASK-A',status:'review',events:[]},eval_harness:{available:true,freshness:'current',summary:{decision:'pass',passed:1,total:1},results:[]},learning:{assets:[],bindings:[],metrics:{}},learning_sources:{tasks:[],feedback:[]}};}
 function runtime(id='I1'){return {initiative_id:id,run_id:'RUN-A',revision:3,state:'confirmed',task_id:'TASK-A',profile_id:'PROFILE-A',profiles:[{id:'PROFILE-A',name:'默认'}],candidate_sha256:'sha-A',subtasks:[],approvals:[],budget:{token_budget:100,max_workers:2},can_pause:false,can_resume:true,can_cancel:true};}
+
+test('workflow cancel binds the matching readable execution attempt',async()=>{
+  for(const matching of [true,false]) {
+    const a=setup(),work={...workflow(),stage:'executing',plan:{plan_id:'RUN-A'}};a.state(work);
+    const run={...runtime(),state:'running',session_id:'SESSION-A',control_revision:2,
+      run_id:matching ? 'RUN-A' : 'OLD-RUN'};
+    a.context.run=run;vm.runInContext('platformState.runtime=run;platformState.runtimeReadable=true;',a.context);
+    a.context.refreshPlatformViews=async()=>{};
+    a.context.api=async(url,options)=>{a.calls.push({url,body:JSON.parse(options.body)});return {...work,revision:5,stage:'cancelling'};};
+    await a.context.initiativeWorkAction('cancel');
+    assert.equal(a.calls.length,1);
+    const body=a.calls[0].body;
+    assert.equal(body.revision,4);
+    if(matching) {
+      assert.equal(body.run_id,'RUN-A');assert.equal(body.session_id,'SESSION-A');assert.equal(body.control_revision,2);
+    } else assert.equal(Object.hasOwn(body,'run_id'),false);
+  }
+});
 function withDrafts(a) {
   vm.runInContext(fs.readFileSync('workbench_web/drafts.js','utf8'),a.context);
   a.context.WorkbenchDrafts.init('runtime-A',a.store);

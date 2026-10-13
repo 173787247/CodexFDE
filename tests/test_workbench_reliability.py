@@ -47,6 +47,25 @@ class WorkbenchReliabilityTests(unittest.TestCase):
         connection.close()
         return result
 
+    def test_low_disk_still_allows_bound_workflow_stop_but_blocks_new_work(self):
+        item = self.app.initiatives.create({'title': 'stop fixture', 'raw_signal': 'stop fixture',
+            'source': 'test', 'project_id': self.app.default_project}, 'owner')
+        workflow = self.app.initiative_workflow
+        data = workflow._load(item['id'])
+        data['stage'] = 'researching'
+        workflow._save(data)
+        event = workflow.cancel_events[item['id']] = threading.Event()
+        status = (503, {'checks': {'database': {'ok': True}, 'recovery': {'ok': True}, 'disk': {'ok': False}}})
+        path = '/api/v1/initiatives/' + item['id'] + '/workflow/'
+        with patch('workbench.service_health.readiness', return_value=status):
+            code, _, _ = self.request(path + 'discuss', {'actor': 'owner', 'revision': data['revision'], 'text': 'new work'})
+            self.assertEqual(503, code)
+            self.assertFalse(event.is_set())
+            code, body, _ = self.request(path + 'cancel', {'actor': 'owner', 'revision': data['revision']})
+            self.assertEqual(200, code)
+            self.assertEqual('cancelling', body['stage'])
+            self.assertTrue(event.is_set())
+
     def test_readiness_checks_actual_database_and_does_not_recreate_missing_data(self):
         self.assertEqual(200, self.request('/api/health/ready')[0])
         database = self.runtime / 'workbench.db'

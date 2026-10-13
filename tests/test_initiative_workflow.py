@@ -229,13 +229,13 @@ class InitiativeWorkflowTests(unittest.TestCase):
     def test_integration_rollback_retains_concurrent_external_change(self):
         self.candidate()
         self.call('accept', '通过', actor='reviewer')
-        real_write = Path.write_bytes
-        def write(path, content):
-            if path == self.root / 'workbench/value.py':
+        real_replace = Path.replace
+        def replace(path, target):
+            if Path(target) == self.root / 'workbench/value.py':
                 (self.root / 'workbench/new.py').write_text('EXTERNAL = True\n')
                 raise OSError('disk write failed')
-            return real_write(path, content)
-        with patch.object(Path, 'write_bytes', write):
+            return real_replace(path, target)
+        with patch.object(Path, 'replace', replace):
             self.call('integrate', actor='reviewer')
             result = self.wait()
         self.assertEqual('failed', result['stage'])

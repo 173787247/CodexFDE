@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from contextlib import nullcontext
 
 from .daily_delivery import manifest, prepare_daily, submit_daily
 from .initiative_research import InitiativeResearch
@@ -123,15 +124,31 @@ class InitiativeWorkflow:
             self._save(data)
         return self.get(item_id)
 
-    def cancel(self, item_id, actor, revision):
+    def cancel(self, item_id, actor, revision, *, run_id=None, session_id=None, control_revision=None):
         actor = self.actor(actor)
         with self.lock:
             data = self._load(item_id)
+            binding = any(value is not None for value in (run_id, session_id, control_revision))
+            if type(revision) is not int or revision < 0 or (not binding and data['revision'] != revision):
+                raise ValueError('事项进展已变化，请刷新后核对最新内容')
             if data['stage'] in {'cancelled', 'cancelling'}:
+                if binding:
+                    raise ValueError('当前运行已停止，请刷新后核对最新内容')
                 return self.get(item_id)
             if data['stage'] not in {'queued', 'executing', 'researching', 'checking'}:
                 raise ValueError('当前没有可取消的执行')
-            self.cancel_events[item_id].set()
+            runtime = getattr(self, 'delivery_runtime', None)
+            with runtime.lock if runtime is not None else nullcontext():
+                active = runtime._load(item_id) if runtime is not None else None
+                current_run = bool(active and data['stage'] in {'queued', 'executing'}
+                    and active['run_id'] == (data.get('plan') or {}).get('plan_id')
+                    and active['state'] in {'running', 'queued', 'awaiting_approval', 'pausing'})
+                if binding and not current_run:
+                    raise ValueError('运行身份已变化，请刷新后核对最新内容')
+                if current_run:
+                    runtime.control(item_id, 'cancel', actor, active['revision'],
+                                    run_id=run_id, session_id=session_id, control_revision=control_revision)
+            self.cancel_events.setdefault(item_id, threading.Event()).set()
             data['stage'] = 'cancelling'
             self._event(data, 'user', '请求取消；正在停止并保留证据', actor=actor)
             self._save(data)
@@ -163,9 +180,9 @@ class InitiativeWorkflow:
         from .reference_paths import resolve_reference
         return resolve_reference(path, self.runtime).resolve()
 
-    def _save(self, data):
+    def _save(self, data, *, connection=None):
         data['revision'] += 1
-        with self.tasks.connect() as db:
+        with nullcontext(connection) if connection is not None else self.tasks.connect() as db:
             db.execute('INSERT OR REPLACE INTO initiative_workflows VALUES (?,?)',
                        (data['id'], json.dumps(data, ensure_ascii=False)))
 
@@ -313,6 +330,8 @@ class InitiativeWorkflow:
     def get(self, item_id):
         with self.lock:
             data = copy.deepcopy(self._load(item_id))
+        from .eval_harness import ReadSnapshot
+        snapshot = ReadSnapshot(self.runtime, loader=lambda source: manifest(source, self.runtime, record_process=False))
         data['enabled'] = self.enabled
         data['project'] = self.project(item_id)
         data['learning'] = self.learning.view(item_id)
@@ -324,7 +343,7 @@ class InitiativeWorkflow:
         if data.get('research_manifest') is not None and data['stage'] in {'clarifying', 'ready', 'confirmed'}:
             source = self.workspace_path(data['workspace']) if data['workspace'] else self.repository_for(item_id)
             try:
-                current = manifest(source, self.runtime)
+                current = snapshot.files(source)
                 data['source_check'] = research_source_check(source, data['research_manifest'], current, data['proposal'])
                 changes = data['source_check']['files']
                 data['warning'] = (f'本事项所属项目有 {len(changes)} 项文件变化。'
@@ -349,7 +368,7 @@ class InitiativeWorkflow:
             latest = next((r for r in reversed(data.get('eval_runs', []))
                            if r['task_id'] == task['id']), None)
             report = latest.get('report') if latest else task.get('result')
-            data['eval_harness'] = report_view(report, data.get('workspace'), self.runtime)
+            data['eval_harness'] = report_view(report, data.get('workspace'), self.runtime, snapshot=snapshot)
             data['eval_harness']['error'] = latest.get('error', '') if latest else ''
             data['eval_harness']['can_run'] = bool(self.enabled and not data.get('v0') and
                 data['stage'] in {'review', 'rework'} and data.get('workspace') and
@@ -357,7 +376,7 @@ class InitiativeWorkflow:
         from .repair_loop import project as loop_project
         data['repair_loop'] = loop_project(data.get('repair_loop_config'), data.get('iterations', []), self.tasks)
         from .quality_hook import view as hook_view
-        data['quality_hook'] = hook_view(data.get('hook_package'), data.get('workspace'), data.get('active_task_id'))
+        data['quality_hook'] = hook_view(data.get('hook_package'), data.get('workspace'), data.get('active_task_id'), snapshot=snapshot)
         data['quality_hook']['can_prepare'] = bool(not data.get('v0') and
             data['stage'] in {'review', 'rework'} and data.get('workspace') and data.get('active_task_id') and
             ((data.get('plan') or {}).get('project') or {}).get('eval_command'))
@@ -886,11 +905,14 @@ class InitiativeWorkflow:
             if latest and report['summary']['decision'] != 'pass':
                 raise ValueError('最近一次 Eval 未通过，不能接受候选')
             self.learning.check_acceptance(data['active_task_id'])
-            self.tasks.review(data['active_task_id'], actor, 'approve', note.strip())
+            # All review guards run before the shared connection starts writing.
+            # Task status, named review and initiative acceptance commit together.
+            with self.tasks.connect() as db:
+                self.tasks.review(data['active_task_id'], actor, 'approve', note.strip(), connection=db)
+                data['stage'] = 'accepted'
+                self._event(data, 'user', '接受本轮候选：' + note.strip(), actor=actor)
+                self._save(data, connection=db)
             self.learning.finish(data['active_task_id'], note=note.strip())
-            data['stage'] = 'accepted'
-            self._event(data, 'user', '接受本轮候选：' + note.strip(), actor=actor)
-            self._save(data)
         return self.get(item_id)
 
     def integrate(self, item_id, actor, revision):
@@ -936,46 +958,60 @@ class InitiativeWorkflow:
                 destination.write_bytes(content)
         receipt = {'files': changed, 'actor': actor, 'task_id': data['active_task_id'], 'state': 'applying'}
         receipt_path = folder / 'receipt.json'
-        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+        from .file_io import atomic_write_bytes, atomic_write_text
+        def save_receipt():
+            atomic_write_text(receipt_path, json.dumps(receipt, ensure_ascii=False))
+        save_receipt()
+        def checked_target(relative, expected):
+            target = repository / relative
+            if target.is_symlink() or not target.resolve().is_relative_to(repository):
+                raise ValueError('集成目标路径越界')
+            actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+            if actual != expected:
+                raise ValueError('集成期间源文件变化，已停止')
+            return target
         written = []
         try:
             for p in changed:
-                target = repository / p
-                if target.is_symlink() or not target.resolve().is_relative_to(repository):
-                    raise ValueError('集成目标路径越界')
-                actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
-                if actual != before.get(p):
-                    raise ValueError('集成期间源文件变化，已停止')
+                target = checked_target(p, before.get(p))
                 if p in candidate:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes((workspace / p).read_bytes())
+                    content = (workspace / p).read_bytes()
+                    if hashlib.sha256(content).hexdigest() != candidate[p]:
+                        raise ValueError('集成期间候选文件变化，已停止')
+                    atomic_write_bytes(target, content, before_replace=lambda: checked_target(p, before.get(p)))
                 else:
                     target.unlink()
                 written.append(p)
             if manifest(repository, self.runtime) != candidate:
                 raise ValueError('集成后的源码与已验收候选不一致')
-        except Exception:
+        except Exception as error:
             conflicts = []
+            rollback_errors = {}
             for p in reversed(written):
                 content = backups[p]
-                target = repository / p
-                if target.is_symlink() or not target.resolve().is_relative_to(repository):
+                try:
+                    target = checked_target(p, candidate.get(p))
+                    if content is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write_bytes(target, content, before_replace=lambda: checked_target(p, candidate.get(p)))
+                    checked_target(p, before.get(p))
+                except Exception as rollback_error:
                     conflicts.append(p)
-                    continue
-                actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
-                if actual != candidate.get(p):
-                    conflicts.append(p)
-                    continue
-                if content is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(content)
-            receipt.update(state='rollback_conflict' if conflicts else 'rolled_back', conflicts=conflicts)
-            receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+                    rollback_errors[p] = str(rollback_error)
+            receipt.update(state='rollback_conflict' if conflicts else 'rolled_back', conflicts=conflicts,
+                           rollback_errors=rollback_errors, error=str(error))
+            try:
+                save_receipt()
+            except Exception as receipt_error:
+                if hasattr(error, 'add_note'):
+                    error.add_note('集成失败回执无法保存：' + str(receipt_error))
+                logging.getLogger(__name__).error('集成失败回执无法保存：%s', receipt_error)
             raise
         receipt.update(state='integrated', after_manifest=candidate)
-        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
+        save_receipt()
         with self.lock:
             current = self._load(item_id)
             current.update(stage='integrated', integration={'files': changed, 'receipt': str(receipt_path), 'committed': False})

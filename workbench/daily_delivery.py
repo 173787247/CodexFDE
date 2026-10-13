@@ -15,19 +15,19 @@ from .spec import parse_spec
 from .workflow import run_task
 
 
-def snapshot_paths(root, runtime):
+def snapshot_paths(root, runtime, *, record_process=True):
     if not (root / '.git').exists() and (root / 'workbench/cli.py').is_file() and (root / 'eval/harness.py').is_file():
         return source_paths(root, runtime)
     from .project_delivery import project_source_paths
-    return project_source_paths(root, runtime)
+    return project_source_paths(root, runtime, record_process=record_process)
 
 
-def manifest(repository, runtime):
+def manifest(repository, runtime, *, record_process=True):
     runtime = Path(runtime).resolve()
     with reference_mapping_scope(runtime, load_reference_mappings(runtime)):
         root = resolve_reference(repository, runtime).resolve()
         return {p.relative_to(root).as_posix(): hashlib.sha256(read_bytes(p)).hexdigest()
-                for p in snapshot_paths(root, runtime)}
+                for p in snapshot_paths(root, runtime, record_process=record_process)}
 
 
 def prepare_daily(repository, runtime, actor, request, acceptance, write_scope, non_goals='不扩大本次需求范围', *, project=None):

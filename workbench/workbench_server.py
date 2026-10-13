@@ -610,7 +610,8 @@ def make_handler(app: WorkbenchApp):
                     return self._json(409, {'error':'instance_changed', 'message':'工作台服务或数据库实例变化，请重新载入核对后决定；本次操作未执行。', 'automatic_replay':False})
                 from .service_health import readiness
                 ready_status, ready = readiness(app.runtime, app.runtime_instance)
-                safe_stop = (path.endswith('/runtime/control') and body.get('action') in {'pause', 'cancel'}
+                safe_stop = ((path.endswith('/runtime/control') and body.get('action') in {'pause', 'cancel'}
+                              or path.endswith('/workflow/cancel'))
                              and ready['checks']['database']['ok'] and ready['checks']['recovery']['ok'])
                 if ready_status != 200 and not safe_stop:
                     return self._json(503, {'error': 'service_unavailable',
@@ -681,7 +682,9 @@ def make_handler(app: WorkbenchApp):
                         if action == 'confirm-prd':
                             return self._json(200, service.confirm_prd(item_id, actor, revision, body.get('success_metric')))
                         if action == 'cancel':
-                            return self._json(200, service.cancel(item_id, actor, revision))
+                            return self._json(200, service.cancel(item_id, actor, revision,
+                                run_id=body.get('run_id'), session_id=body.get('session_id'),
+                                control_revision=body.get('control_revision')))
                         if action == 'confirm':
                             return self._json(200, service.confirm(item_id, actor, revision, body.get('reviewer')))
                         if action == 'execute':

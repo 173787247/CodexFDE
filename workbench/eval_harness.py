@@ -1,6 +1,8 @@
 """Project Eval evidence: validate results and expose freshness without granting acceptance."""
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from .file_io import read_bytes
@@ -8,6 +10,28 @@ from .file_io import read_bytes
 
 def fingerprint(files):
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+class ReadSnapshot:
+    """Share one source read within a projection; never across requests or gates."""
+    def __init__(self, runtime, *, loader=None):
+        self.runtime, self.loader = runtime, loader
+        self._files, self._errors = {}, {}
+
+    def files(self, workspace):
+        from .reference_paths import resolve_reference
+        key = os.path.normcase(str(resolve_reference(workspace, self.runtime).resolve()))
+        if key in self._errors:
+            raise self._errors[key]
+        if key not in self._files:
+            from .daily_delivery import manifest
+            try:
+                self._files[key] = (self.loader(workspace) if self.loader else
+                                    manifest(workspace, self.runtime, record_process=False))
+            except Exception as error:
+                self._errors[key] = error
+                raise
+        return self._files[key]
 
 
 def validate_project_report(report, returncode):
@@ -42,7 +66,7 @@ def validate_project_report(report, returncode):
         raise RuntimeError('项目 Eval 阻断失败不能声明通过')
 
 
-def report_view(report, workspace, runtime):
+def report_view(report, workspace, runtime, *, snapshot=None):
     """Historical reports without a source binding are explicitly unverified."""
     if not report:
         return {'available': False, 'freshness': 'unverified'}
@@ -52,12 +76,12 @@ def report_view(report, workspace, runtime):
     if runner.get('candidate_sha256') and workspace:
         from .daily_delivery import manifest
         try:
-            current = fingerprint(manifest(workspace, runtime))
+            current = fingerprint(snapshot.files(workspace) if snapshot else manifest(workspace, runtime))
             path = Path(runtime) / report['report_path'] if report.get('report_path') else Path(runner['report_path'])
             from .reference_paths import reference_mapping_scope, load_reference_mappings
             with reference_mapping_scope(runtime, load_reference_mappings(runtime)):
                 valid_file = hashlib.sha256(read_bytes(path)).hexdigest() == report.get('report_sha256')
             view['freshness'] = 'current' if current == runner['candidate_sha256'] and valid_file else 'stale'
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
             view['freshness'] = 'unavailable'
     return view

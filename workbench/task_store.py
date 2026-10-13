@@ -5,7 +5,7 @@ import hashlib
 import re
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator
 
@@ -229,8 +229,8 @@ class TaskStore:
                                             'parsed': parsed, 'workspace_path': workspace,
                                             'source_task_id': source_task_id})
 
-    def get(self, task_id: str) -> dict:
-        with self.connect() as conn:
+    def get(self, task_id: str, *, connection=None) -> dict:
+        with nullcontext(connection) if connection is not None else self.connect() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row:
                 raise KeyError(task_id)
@@ -365,6 +365,7 @@ class TaskStore:
         *,
         actor: str = "system",
         evidence: object = None,
+        connection=None,
         **payload: object,
     ) -> dict:
         acceptance_learning = None
@@ -380,8 +381,9 @@ class TaskStore:
                 from .learning import LearningStore
                 acceptance_learning = LearningStore(self.path)
                 acceptance_learning.check_acceptance(task_id)
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with nullcontext(connection) if connection is not None else self.connect() as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT status,result_json,version FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row:
                 raise KeyError(task_id)
@@ -422,11 +424,11 @@ class TaskStore:
                 (task_id, current, to_status, detail, actor.strip() or "system",
                  json.dumps(evidence, ensure_ascii=False) if evidence is not None else None),
             )
-        if acceptance_learning:
+        if acceptance_learning and connection is None:
             acceptance_learning.finish(task_id, note=str(payload.get('review_note', '')))
-        return self.get(task_id)
+        return self.get(task_id, connection=connection) if connection is not None else self.get(task_id)
 
-    def review(self, task_id: str, reviewer: str, decision: str, note: str) -> dict:
+    def review(self, task_id: str, reviewer: str, decision: str, note: str, *, connection=None) -> dict:
         from .agent_roster import assert_boss_actor
 
         reviewer = assert_boss_actor(reviewer)
@@ -464,7 +466,8 @@ class TaskStore:
             task_id, target, f"老板终审：{decision}；{note}", actor=reviewer,
             evidence={"reviewer": reviewer, "decision": decision, "note": note, "opc_final": True},
             reviewer=reviewer, review_decision=decision, review_note=note,
+            connection=connection,
         )
-        if learning:
+        if learning and connection is None:
             learning.finish(task_id, note=note)
         return result

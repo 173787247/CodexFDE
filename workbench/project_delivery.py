@@ -10,20 +10,20 @@ from .execution import CodexExecutionRunner, _is_sensitive_path
 from .file_io import read_bytes, read_text
 
 
-def project_source_paths(root, runtime):
+def project_source_paths(root, runtime, *, record_process=True):
     from .execution_control import checkpoint
     from .file_io import atomic_write_text
     checkpoint()
     command = ['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard']
-    folder = Path(runtime) / 'git-processes' / secrets.token_hex(12)
-    folder.mkdir(parents=True, exist_ok=False)
-    runner = CodexExecutionRunner(root, folder)
+    folder = Path(runtime) / 'git-processes' / secrets.token_hex(12) if record_process else None
+    if folder is not None:
+        folder.mkdir(parents=True, exist_ok=False)
+    runner = CodexExecutionRunner(root, folder if folder is not None else runtime)
     result = None
     error = None
     try:
         result = runner._run_codex_streaming(command, '', 120, lambda line: None,
                                              time.monotonic(), binary_stdout=True)
-        (folder / 'stdout.bin').write_bytes(result.stdout)
         if result.returncode:
             raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
         checkpoint()
@@ -31,17 +31,27 @@ def project_source_paths(root, runtime):
         error = failure
         raise
     finally:
-        receipt = {'command': command, 'cwd': str(Path(root).resolve()),
-                   'returncode': result.returncode if result else None,
-                   'stdout_path': str(folder / 'stdout.bin'),
-                   'stdout_sha256': hashlib.sha256(result.stdout).hexdigest() if result else None,
-                   'stderr': result.stderr if result else '', 'success': result is not None and error is None,
-                   'error': str(error) if error else ''}
-        try:
-            atomic_write_text(folder / 'process.json', json.dumps(receipt, ensure_ascii=False))
-        except Exception as persistence_error:
-            if error is None: raise
-            error.add_note('源码清单回执保存失败：' + str(persistence_error))
+        # Successful UI reads need no durable process artifact. Delivery checks
+        # keep their receipts, and failed reads still retain diagnostic evidence.
+        if record_process or error is not None:
+            try:
+                if folder is None:
+                    folder = Path(runtime) / 'git-processes' / secrets.token_hex(12)
+                    folder.mkdir(parents=True, exist_ok=False)
+                if result is not None:
+                    (folder / 'stdout.bin').write_bytes(result.stdout)
+                receipt = {'command': command, 'cwd': str(Path(root).resolve()),
+                           'returncode': result.returncode if result else None,
+                           'stdout_path': str(folder / 'stdout.bin'),
+                           'stdout_sha256': hashlib.sha256(result.stdout).hexdigest() if result else None,
+                           'stderr': result.stderr if result else '', 'success': result is not None and error is None,
+                           'error': str(error) if error else ''}
+                atomic_write_text(folder / 'process.json', json.dumps(receipt, ensure_ascii=False))
+            except Exception as persistence_error:
+                if error is None:
+                    raise
+                if hasattr(error, 'add_note'):
+                    error.add_note('源码清单回执保存失败：' + str(persistence_error))
     paths = []
     names = set(result.stdout.decode('utf-8').split('\0')) - {''}
     if (root / 'AGENTS.md').is_file():

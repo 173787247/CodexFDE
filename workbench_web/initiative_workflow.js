@@ -254,6 +254,14 @@ async function initiativeWorkAction(action, extra={}) {
   invalidateInitiativeReads();initiativeWorkActions.set(itemId,token);initiativeWorkPending=true;renderInitiativeWork(initiativeWork);
   try {
     const body={actor:actorName(),revision:initiativeWork.revision,...extra};
+    if(action==='cancel' && ['queued','executing'].includes(initiativeWork.stage) &&
+        typeof platformState!=='undefined' && platformState.runtimeReadable && platformState.itemId===itemId) {
+      const runtime=platformState.runtime;
+      if(runtime && runtime.run_id===initiativeWork.plan?.plan_id &&
+          ['running','queued','awaiting_approval','pausing'].includes(runtime.state) &&
+          typeof runtime.session_id==='string' && runtime.session_id && Number.isInteger(runtime.control_revision))
+        Object.assign(body,{run_id:runtime.run_id,session_id:runtime.session_id,control_revision:runtime.control_revision});
+    }
     if(action==='learning' && ['generate','cancel_generation'].includes(extra.fields?.action) && typeof platformKey==='function')body.submission_key=platformKey(itemId+'/learning/'+extra.fields.action,body);
     const path='/api/v1/initiatives/'+itemId+'/workflow/'+action;
     const data=await (body.submission_key && typeof platformPost==='function' ? platformPost(path,body) : api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));
