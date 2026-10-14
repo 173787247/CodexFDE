@@ -662,6 +662,31 @@ class DeliveryRuntimeTests(unittest.TestCase):
         self.assertEqual('cancelled',self.wait()['state'])
         self.assertEqual('1',(self.repository/'a.txt').read_text())
 
+    def test_close_signal_finishes_worker_before_cancel_intent_is_persisted(self):
+        with patch.object(LocalWorker,'delay',10):
+            self.start()
+            deadline=time.monotonic()+5
+            while not any(c['status']=='running' for c in self.view()['subtasks']) and time.monotonic()<deadline:
+                time.sleep(.01)
+            event=self.runtime.events[self.item['id']]
+            original=event.set
+            worker=self.runtime.workers[self.item['id']]
+            closer=threading.current_thread()
+            def finish_on_signal():
+                original()
+                # close() signals before it takes state locks. Make that actual
+                # owned worker finish in this window instead of relying on timing.
+                if threading.current_thread() is closer:
+                    worker.join(3)
+                    self.assertFalse(worker.is_alive(),'fixture did not reach the pre-persistence shutdown window')
+            with patch.object(event,'set',side_effect=finish_on_signal):
+                receipt=self.runtime.close()
+        self.assertEqual(0,receipt['workers_still_stopping'])
+        result=self.wait()
+        self.assertEqual('cancelled',result['state'],result)
+        self.assertEqual('cancel',result['requested_control'])
+        self.assertEqual('1',(self.repository/'a.txt').read_text())
+
     @contextmanager
     def parent_eval_fixture(self, phase):
         """Keep a real parent Eval alive; retain and reclaim only this fixture's jobs."""
