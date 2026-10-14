@@ -8,6 +8,9 @@ import shlex
 import sys
 import time
 
+DEFAULT_EVAL_TIMEOUT = 900
+HOOK_RETURN_MARGIN = 60
+
 from .file_io import read_bytes, read_text
 
 
@@ -27,7 +30,7 @@ def write_json(path, value):
     return _write_checked_text(path, json.dumps(value, ensure_ascii=False, indent=2))
 
 
-def prepare(runtime, workspace, project, task_id, item_id, actor):
+def prepare(runtime, workspace, project, task_id, item_id, actor, *, timeout=DEFAULT_EVAL_TIMEOUT):
     """Freeze the confirmed command, identity and runner in an append-only package."""
     root, runtime = Path(workspace).resolve(), Path(runtime).resolve()
     if not root.is_dir() or not (root / '.git').exists():
@@ -41,11 +44,13 @@ def prepare(runtime, workspace, project, task_id, item_id, actor):
         raise ValueError('本事项尚未确认项目质量检查命令')
     if not actor.strip():
         raise ValueError('请填写准备者姓名')
+    if type(timeout) is not int or not 1 <= timeout <= 1800:
+        raise ValueError('Hook 内部检查时限必须是 1 到 1800 秒的整数')
     folder = runtime / 'hook-packages' / secrets.token_hex(16)
     folder.mkdir(parents=True)
     binding = dict(schema='workbench.quality-hook/v1', workspace=str(root), runtime=str(runtime),
         project_id=project['id'], task_id=task_id, initiative_id=item_id, actor=actor,
-        command=command, timeout=100, prepared_at=time.time())
+        command=command, timeout=timeout, prepared_at=time.time())
     binding_sha256 = write_json(folder / 'binding.json', binding)
     # The customer repository does not need to install the Workbench package.
     # Use the explicitly reviewed controller interpreter and module, but execute
@@ -64,7 +69,7 @@ def prepare(runtime, workspace, project, task_id, item_id, actor):
     script = f'& {psquote(python)} -X utf8 {psquote(str(installed))}; exit $LASTEXITCODE'
     windows = 'powershell -NoProfile -EncodedCommand ' + base64.b64encode(script.encode('utf-16-le')).decode('ascii')
     entry = {'type': 'command', 'command': shlex.join([python, '-X', 'utf8', str(installed)]),
-             'commandWindows': windows, 'timeout': 120, 'statusMessage': '运行本事项候选质量检查'}
+             'commandWindows': windows, 'timeout': timeout + HOOK_RETURN_MARGIN, 'statusMessage': '运行本事项候选质量检查'}
     config_sha256 = write_json(folder / 'hooks.json', {'description': '工作台准备的候选 Stop 检查；安装后须在 /hooks 审查与信任',
                                      'hooks': {'Stop': [{'hooks': [entry]}]}})
     return {'path': str(folder), 'workspace': str(root), 'task_id': task_id,

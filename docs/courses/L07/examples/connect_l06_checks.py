@@ -3,12 +3,23 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
-from workbench.external_project import flowerp_root
+
+def flowerp_root(candidate_source):
+    value = os.environ.get('FLOWERP_PROJECT_ROOT')
+    if not value:
+        marker = candidate_source / '.course/experiment-source.json'
+        if not marker.is_file():
+            raise ValueError('先设置 FLOWERP_PROJECT_ROOT；来源副本也没有客户来源记录')
+        value = json.loads(marker.read_text('utf-8-sig')).get('product_root')
+    if not value:
+        raise ValueError('客户来源记录缺少 product_root，不使用参考工作台登记')
+    return Path(value).resolve(strict=True)
 
 spec = importlib.util.spec_from_file_location('stock_practice', ROOT/'docs/courses/L06/examples/stock_practice.py')
 stock = importlib.util.module_from_spec(spec)
@@ -39,7 +50,7 @@ def connect(session, report, target, receipt):
         raise ValueError('L06 business is still blocked; do not migrate')
     target = target.resolve(strict=True)
     source = s['candidate']
-    if target in (ROOT, flowerp_root(), source) or source in target.parents or target in source.parents:
+    if target in (ROOT, flowerp_root(source), source) or source in target.parents or target in source.parents:
         raise ValueError('Use a separate isolated L07 candidate, not source or maintained repositories')
     receipt = receipt.resolve()
     if receipt.exists() or receipt.is_relative_to(target):
@@ -55,13 +66,18 @@ def connect(session, report, target, receipt):
         payload['tests/__init__.py'] = b''
     for name in payload:
         if (target/name).exists():
-            raise FileExistsError(target/name)
+            if not (target/name).is_file() or (target/name).read_bytes() != payload[name]:
+                raise FileExistsError('候选已有不同内容，保留原件后核对：' + str(target/name))
     evidence = dict(source_session=str(Path(session).resolve()), source_report=str(Path(report).resolve()),
                     target=str(target), files={name: hashlib.sha256(data).hexdigest() for name,data in payload.items()},
                     registry_before_sha256=hashlib.sha256(before.encode()).hexdigest(), names=NAMES,
+                    reused_identical=[name for name in payload if (target/name).is_file()],
                     status='connected; execution and human acceptance pending')
     for name,data in payload.items():
-        dest=target/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+        dest=target/name;dest.parent.mkdir(parents=True,exist_ok=True)
+        if not dest.exists():
+            with dest.open('xb') as stream:
+                stream.write(data)
     after=before.replace(anchor,BLOCK+anchor)
     registry.write_text(after,'utf8')
     evidence['registry_after_sha256']=hashlib.sha256(after.encode()).hexdigest()

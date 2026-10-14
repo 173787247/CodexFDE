@@ -86,6 +86,56 @@ class L00ShellTests(unittest.TestCase):
         self.assertEqual(status.returncode, 2)
         self.assertIn("invalid choice", status.stderr)
 
+    def test_borrowed_environment_cannot_supply_missing_personal_modules(self):
+        PREPARE(self.target)
+        probe = '''
+import importlib
+from pathlib import Path
+import sys
+from importlib.util import spec_from_file_location
+reference = Path(sys.argv[1])
+class BorrowedEditableFinder:
+    def find_spec(self, fullname, path=None, target=None):
+        candidate = reference.joinpath(*fullname.split('.')).with_suffix('.py')
+        if candidate.is_file():
+            return spec_from_file_location(fullname, candidate)
+sys.meta_path.append(BorrowedEditableFinder())
+for name in ('workbench.spec', 'workbench.workflow', 'eval.harness', 'agent.loop'):
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        assert error.name == name, (name, error)
+    else:
+        raise AssertionError('loaded an unfinished module from the reference: ' + name)
+import workbench.runtime_paths
+assert Path(workbench.runtime_paths.__file__).resolve().is_relative_to(Path.cwd())
+'''
+        result = subprocess.run([sys.executable, '-B', '-X', 'utf8', '-c', probe, str(ROOT)],
+                                cwd=self.target, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_borrowed_environment_cannot_replace_a_top_level_personal_package(self):
+        PREPARE(self.target)
+        probe = '''
+import importlib,sys
+from pathlib import Path
+import workbench
+root=Path(workbench.__file__).resolve().parents[1]
+sys.path[:]=[value for value in sys.path if Path(value or '.').resolve()!=root]
+for name in ('agent','eval','harness_web'):
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        assert error.name==name, (name,error)
+    else:
+        raise AssertionError('reference supplied top-level package '+name)
+import json
+assert json.loads('{"stdlib_still_works":true}')['stdlib_still_works']
+'''
+        result=subprocess.run([sys.executable,'-B','-X','utf8','-c',probe],cwd=self.target,
+            capture_output=True,text=True,encoding='utf8',timeout=15)
+        self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+
     def test_root_entry_preserves_cli_help_and_defaults_to_same_server(self):
         PREPARE(self.target)
         default_entry = subprocess.run(

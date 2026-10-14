@@ -38,7 +38,9 @@ def prepare(run,l05_session):
     if run.exists():raise FileExistsError('Use a new run directory; resume from existing session.json')
     run.mkdir(parents=True);candidate=run/'candidate';candidate.mkdir()
     copy_experiment_sources(candidate)
-    (candidate/'tests').mkdir();(candidate/'tests/__init__.py').write_text('',encoding='utf8')
+    (candidate/'tests').mkdir(exist_ok=True)
+    if not (candidate/'tests/__init__.py').exists():
+        (candidate/'tests/__init__.py').write_text('',encoding='utf8')
     for name in L05:
         (candidate/name).parent.mkdir(exist_ok=True);shutil.copy2(source/name,candidate/name)
     for origin,target in [('runner_starter.py','eval/l06_runner.py'),

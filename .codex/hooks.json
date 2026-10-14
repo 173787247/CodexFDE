@@ -9,7 +9,7 @@
             "command": "\"$(git rev-parse --show-toplevel)/.venv/bin/python\" -X utf8 \"$(git rev-parse --show-toplevel)/.codex/hooks/quality_gate.py\"",
             "commandWindows": "powershell -NoProfile -Command \"$r = git rev-parse --show-toplevel; if ($LASTEXITCODE -ne 0) { exit 1 }; & (Join-Path $r '.venv/Scripts/python.exe') -X utf8 (Join-Path $r '.codex/hooks/quality_gate.py'); exit $LASTEXITCODE\"",
             "statusMessage": "Running Workbench blocking evals",
-            "timeout": 120
+            "timeout": 960
           }
         ]
       }

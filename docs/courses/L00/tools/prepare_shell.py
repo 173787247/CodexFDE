@@ -11,6 +11,8 @@ import stat
 import sys
 
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
+from workbench.file_io import read_bytes, read_text
 STARTER = Path(__file__).resolve().parents[1] / "starter"
 CORE_SHELL_FILES = (
     "workbench/__init__.py", "workbench/cli.py", "workbench/runtime_paths.py",
@@ -18,6 +20,7 @@ CORE_SHELL_FILES = (
     "workbench_web/app.js", "workbench_web/styles.css", "pyproject.toml", "README.md", ".gitignore",
 )
 SHELL_FILES = CORE_SHELL_FILES + (
+    "workbench/_source_boundary.py",
     "main.py", "AGENTS.md", "agent/__init__.py", "eval/__init__.py", "harness_web/__init__.py",
     "scripts/.gitkeep", "deploy/.gitkeep", "docs/README.md", "docs/reference/README.md",
     "docs/reference/工作台具体设计.md", "tests/__init__.py", "tests/test_workbench_server.py",
@@ -57,7 +60,7 @@ def _read_file(path: Path) -> bytes:
     _check_path(path)
     if not path.is_file():
         raise ValueError(f"缺少必需文件：{path}")
-    return path.read_bytes()
+    return read_bytes(path)
 
 
 def _digest(content: bytes) -> str:
@@ -79,7 +82,7 @@ def _validate_shell(target: Path) -> dict[str, str]:
                            ("workbench/workbench_server.py", {"WorkbenchApp", "make_handler", "serve"}),
                            ("workbench/cli.py", {"main"})):
         try:
-            source = (target / name).read_text(encoding="utf-8-sig")
+            source = read_text(target / name, encoding="utf-8-sig")
             tree = ast.parse(source, filename=name)
         except (SyntaxError, UnicodeError) as error:
             raise ValueError(f"壳源码不能解析：{name}：{error}") from error
@@ -124,7 +127,7 @@ def prepare_shell(value: str | Path, *, continue_l01: bool = False) -> dict:
         destination = target / name
         _check_path(destination)
         if destination.exists():
-            if not destination.is_file() or destination.read_bytes() != content:
+            if not destination.is_file() or read_bytes(destination) != content:
                 raise ValueError(f"已有文件不同，保留原文件并停止：{destination}")
         else:
             writes[name] = content
@@ -134,7 +137,7 @@ def prepare_shell(value: str | Path, *, continue_l01: bool = False) -> dict:
         if not continue_l01 or not metadata_path.is_file():
             raise ValueError(f"不能覆盖已有隔离记录：{metadata_path}")
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            metadata = json.loads(read_text(metadata_path, encoding="utf-8-sig"))
             valid = (metadata["source_root"] == str(ROOT) and metadata["path"] == str(target)
                      and metadata["source"] == "personal_shell"
                      and metadata["student_start"]["lesson"] == 1

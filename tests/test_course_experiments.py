@@ -32,7 +32,8 @@ class CourseExperimentTests(unittest.TestCase):
     def command(self, *args, expected=0, cwd=ROOT):
         command = [sys.executable, '-B', '-X', 'utf8', *map(str, args)]
         result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, encoding='utf-8',
-                                env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'), timeout=120)
+                                env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                                         FLOWERP_PROJECT_ROOT=str(self.product)), timeout=120)
         self.counter += 1
         (self.run/f'{self.counter:02}.json').write_text(json.dumps(dict(command=command, cwd=str(cwd),
              stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode), ensure_ascii=False, indent=2), encoding='utf-8')

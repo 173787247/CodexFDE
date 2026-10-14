@@ -61,15 +61,16 @@ def retrieve(
     return candidates[:top_k]
 
 
-def context_pack(query: str, project: str, results: list[dict]) -> dict:
+def context_pack(query: str, project: str, results: list[dict], *, include_revoked: bool = False) -> dict:
     citations = [f'{item["memory_id"]}@v{item["version"]}' for item in results]
     payload = {
         "schema": "codexfde.l15.rag-context/v1",
         "query": query,
-        "filters": {"project": project, "status": "active"},
+        "filters": {"project": project, "status": "all" if include_revoked else "active"},
         "retrieved": [
             {
                 "memory_ref": citations[index],
+                "status": item["status"],
                 "score": item["score"],
                 "content": item["content"],
                 "applies_when": item["applies_when"],
@@ -88,7 +89,7 @@ def context_pack(query: str, project: str, results: list[dict]) -> dict:
     return payload
 
 
-def evaluate(fixture: dict, top_k: int) -> tuple[dict, bool]:
+def evaluate(fixture: dict, top_k: int, *, include_revoked: bool = False) -> tuple[dict, bool]:
     cases = []
     passed = True
     for query_case in fixture["queries"]:
@@ -97,6 +98,7 @@ def evaluate(fixture: dict, top_k: int) -> tuple[dict, bool]:
             query_case["query"],
             query_case["project"],
             top_k,
+            include_revoked=include_revoked,
         )
         returned = [item["memory_id"] for item in results]
         relevant = set(query_case["relevant"])
@@ -126,6 +128,7 @@ def evaluate(fixture: dict, top_k: int) -> tuple[dict, bool]:
     report = {
         "schema": "codexfde.l15.rag-eval/v1",
         "top_k": top_k,
+        "include_revoked": include_revoked,
         "cases": cases,
         "decision": "pass" if passed else "fail",
         "boundary": "只证明固定教学语料与查询集下的检索合同，不证明生产 RAG 或答案事实正确。",
@@ -154,7 +157,7 @@ def main() -> int:
         parser.error("--top-k 必须大于 0")
     fixture = load_fixture(args.fixture)
     if args.evaluate:
-        output, passed = evaluate(fixture, args.top_k)
+        output, passed = evaluate(fixture, args.top_k, include_revoked=args.include_revoked)
     else:
         if not args.query:
             parser.error("查询模式必须提供 --query，或改用 --evaluate")
@@ -165,7 +168,7 @@ def main() -> int:
             args.top_k,
             include_revoked=args.include_revoked,
         )
-        output = context_pack(args.query, args.project, results)
+        output = context_pack(args.query, args.project, results, include_revoked=args.include_revoked)
         output["diagnostic"] = {
             "include_revoked": args.include_revoked,
             "warning": "反例开关允许撤回条目进入候选，只用于观察治理缺失。"

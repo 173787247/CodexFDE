@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+EVAL_TIMEOUT_SECONDS = 900
+
 
 def main() -> int:
     # Installed location: <project>/.codex/hooks/quality_gate.py
@@ -16,6 +18,8 @@ def main() -> int:
         cwd = Path(event["cwd"]).resolve(strict=True)
         if cwd != root and root not in cwd.parents:
             raise ValueError("event cwd is outside this project")
+        if type(event.get('stop_hook_active', False)) is not bool:
+            raise ValueError('stop_hook_active must be a boolean')
         if event.get("stop_hook_active"):
             print(json.dumps({"continue": True, "systemMessage": "重入跳过；本次未复验。结束前仍须显式运行阻断级 Eval。"}, ensure_ascii=False))
             return 0
@@ -23,7 +27,7 @@ def main() -> int:
         result = subprocess.run(
             [str(python), "-X", "utf8", "-m", "eval.harness", "--suite", "blocking"],
             cwd=root, text=True, encoding="utf-8", errors="replace",
-            capture_output=True, check=False, timeout=100,
+            capture_output=True, check=False, timeout=EVAL_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
             response = {"continue": True, "systemMessage": "当前工作台阻断级 Eval 已通过；不代表 FlowERP 业务验收。"}

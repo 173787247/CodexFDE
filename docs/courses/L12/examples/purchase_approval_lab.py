@@ -73,10 +73,16 @@ def check(mode, states_path=None):
                 if mode=="status-write-failure":
                     assert snapshot()==before_receive,(f"receipt partially committed: status={service.purchase('PR-TARGET')['status']}; on_hand={current['on_hand']}; expected unchanged 10")
                     return "status write failed atomically"
-                assert current["on_hand"]==17 and service.purchase("PR-TARGET")["status"]=="approved"
+                assert snapshot()==before_receive, "failed receipt must roll back all five tables before retry"
                 with store.connect() as conn:
                     conn.execute("DROP TRIGGER fail_target_status")
             key="opening" if mode=="key-collision" else "receipt:target"
+            if mode=="key-collision":
+                try: service.receive_purchase("PR-TARGET",key)
+                except (ValueError,InvalidTransition): pass
+                else: raise AssertionError("receipt key belonging to another business event was accepted")
+                assert snapshot()==before_receive
+                return "key-collision: rejected; five tables unchanged"
             result=service.receive_purchase("PR-TARGET",key)
             record("after_receive")
             if mode=="replay":

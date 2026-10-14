@@ -23,7 +23,7 @@ class QualityHookTests(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', str(self.candidate)], check=True)
         self.runtime = self.root / 'runtime'
         self.project = {'id': 'PROJECT-test', 'root_path': str(self.root / 'product'),
-                        'eval_command': [sys.executable, 'check.py']}
+                        'eval_command': [sys.executable, 'fixture_eval.py']}
         self.package = hook.prepare(self.runtime, self.candidate, self.project, 'TASK-test', 'INIT-test', 'tester')
         self.folder = Path(self.package['path'])
         self.binding = json.loads(read_text(self.folder / 'binding.json'))
@@ -69,7 +69,7 @@ class QualityHookTests(unittest.TestCase):
             self.assertEqual(passed, response.get('continue', False))
             self.assertFalse(record['host_event_verified'])
             self.assertEqual(self.candidate, factory.call_args.args[0])
-            self.assertEqual(100, factory.call_args.kwargs['timeout'])
+            self.assertEqual(hook.DEFAULT_EVAL_TIMEOUT, factory.call_args.kwargs['timeout'])
         factory = Mock()
         response, record = hook.handle(self.binding, dict(self.event(), stop_hook_active=True), runner_factory=factory)
         self.assertTrue(response['continue'])
@@ -89,8 +89,19 @@ class QualityHookTests(unittest.TestCase):
         report = {'summary': {'total': 1, 'passed': int(passed), 'blocking_failed': int(not passed),
                              'observing_failed': 0, 'decision': 'pass' if passed else 'block'},
                   'results': [{'name': 'independent-product', 'level': 'blocking', 'passed': passed}]}
-        (self.candidate / 'check.py').write_text(
+        (self.candidate / 'fixture_eval.py').write_text(
             'import json,sys\nprint(json.dumps(' + repr(report) + '))\nsys.exit(' + str(int(not passed) if exit_code is None else exit_code) + ')\n', encoding='utf-8')
+
+    def test_reviewable_package_keeps_the_host_deadline_later_than_eval(self):
+        package = hook.prepare(self.runtime, self.candidate, self.project, 'TASK-test', 'INIT-test', 'tester', timeout=600)
+        folder = Path(package['path'])
+        binding = json.loads(read_text(folder / 'binding.json'))
+        config = json.loads(read_text(folder / 'hooks.json'))
+        self.assertEqual(600, binding['timeout'])
+        self.assertEqual(660, config['hooks']['Stop'][0]['hooks'][0]['timeout'])
+        for invalid in (0, -1, True, 0.1, 1801):
+            with self.subTest(timeout=invalid), self.assertRaises(ValueError):
+                hook.prepare(self.runtime, self.candidate, self.project, 'TASK-test', 'INIT-test', 'tester', timeout=invalid)
 
     def test_real_generated_handler_runs_candidate_and_keeps_red_green_records(self):
         self.install_fixture()
@@ -122,7 +133,7 @@ class QualityHookTests(unittest.TestCase):
             self.assertEqual('block', json.loads(output.getvalue())['decision'])
 
     def test_real_timeout_returns_unverified(self):
-        (self.candidate / 'check.py').write_text('import time\ntime.sleep(30)\n')
+        (self.candidate / 'fixture_eval.py').write_text('import time\ntime.sleep(30)\n')
         binding = dict(self.binding, timeout=0.1)
         response, record = hook.handle(binding, self.event())
         self.assertEqual('block', response['decision'])

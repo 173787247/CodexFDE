@@ -18,11 +18,11 @@ GAPS: tuple[LessonGap, ...] = (
     LessonGap(1, "签署 Spec、最小任务证据账与首次自举", "五个工作台命令缺失或缺证据仍报通过", ("workbench/bootstrap.py", "tests/test_l01_workbench_bootstrap.py", "docs/courses/L01/WORKBENCH_SPEC.md")),
     LessonGap(2, "AGENTS 规则补丁与越界判决", "越界请求被放行", ()),
     LessonGap(3, "六段 Spec 解析器", "缺字段仍能解析", ("workbench/spec.py",)),
-    LessonGap(4, "库存导出与受控执行摘要", "导出字段/排序与权威库存不一致", ("flowerp/service.py",)),
+    LessonGap(4, "库存导出与受控执行摘要", "导出字段/排序与权威库存不一致", ("flowerp/import_export.py", "flowerp/service.py")),
     LessonGap(5, "幂等入库 Eval 与实现", "同一入库键再次增加库存", ("flowerp/service.py",)),
     LessonGap(6, "统一 Harness 与可用库存口径", "预占后 available 为负仍成功", ("flowerp/service.py",)),
     LessonGap(7, "订单总额守卫与 Codex Hook", "明细合计与总额不一致", ("flowerp/service.py", ".codex/hooks.json")),
-    LessonGap(8, "原子预占与 CI 证据信封", "缺货留下部分预占或假绿信封", ("flowerp/service.py", "workbench/ci_evidence.py")),
+    LessonGap(8, "原子预占与 CI 证据信封", "缺货留下部分预占或假绿信封", ("flowerp/sales.py", "flowerp/service.py", "workbench/ci_evidence.py")),
     LessonGap(9, "取消释放与 Repair Task", "取消已预占订单不释放库存", ("flowerp/service.py",)),
     LessonGap(10, "合法状态迁移与有界 Loop", "未预占订单可直接发货", ("flowerp/service.py",)),
     LessonGap(11, "采购申请与写集冲突判决", "共享写集被标为可并行或申请丢失原因", ("flowerp/service.py", "agent/schedule.py")),
@@ -205,7 +205,50 @@ def apply_student_start(workspace: str | Path, number: int) -> dict:
                                   "content": content.decode('utf-8')})
             progression.unlink()
     pending: dict[str, str] = {}
+    previous_start = {}
+    previous_marker = root / '.course/student-start.json'
+    if previous_marker.is_file():
+        import json
+        try:
+            previous_start = json.loads(previous_marker.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            previous_start = {}
     for overlay in _overlays(number):
+        if number == 8 and overlay.path == 'flowerp/service.py':
+            # The current L08 manual exercises SalesService, not the legacy facade.
+            # A per-line commit makes the second-write failure leave partial state.
+            sales = root / 'flowerp/sales.py'
+            if sales.is_file():
+                text = sales.read_text(encoding='utf-8')
+                anchor = '                conn.execute("UPDATE sales_document_lines SET reserved_quantity=reserved_quantity+? WHERE id=?", (quantity, line["id"]))\n'
+                injected = anchor + '                conn.commit()  # L08 teaching gap: premature per-line commit\n'
+                if injected in text:
+                    existing.append('flowerp/sales.py')
+                    continue
+                if text.count(anchor) == 1 and 'def reserve(' in text:
+                    pending['flowerp/sales.py'] = text.replace(anchor, injected, 1)
+                    applied.append('flowerp/sales.py')
+                    continue
+                unapplied.append({'path': 'flowerp/sales.py', 'reason': 'anchor_missing'})
+                continue
+        if number == 4 and overlay.path == 'flowerp/service.py':
+            # The L04 file/CSV probe calls ImportExportService in current products.
+            # Removing only the legacy facade leaves the actual lesson green.
+            exporter = root / 'flowerp/import_export.py'
+            if exporter.is_file():
+                exporter_text = exporter.read_text(encoding='utf-8')
+                inventory_rows = [line for line in exporter_text.splitlines(keepends=True)
+                                  if line.lstrip().startswith('"inventory":("SELECT p.sku,p.name,')]
+                if len(inventory_rows) == 1 and 'def export_csv(' in exporter_text:
+                    pending['flowerp/import_export.py'] = exporter_text.replace(inventory_rows[0], '', 1)
+                    applied.append('flowerp/import_export.py')
+                    continue
+                if (not inventory_rows and 'def export_csv(' in exporter_text
+                        and isinstance(previous_start, dict) and previous_start.get('lesson') == 4
+                        and 'flowerp/import_export.py' in (previous_start.get('applied_overlays', [])
+                                                         + previous_start.get('existing_overlays', []))):
+                    existing.append('flowerp/import_export.py')
+                    continue
         target = root / overlay.path
         if not target.is_file():
             unapplied.append({"path": overlay.path, "reason": "source_missing"})
