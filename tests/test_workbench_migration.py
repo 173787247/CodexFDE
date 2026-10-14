@@ -411,9 +411,9 @@ class WorkbenchMigrationTests(unittest.TestCase):
             # The actual fixture Eval ignores the extra argument, but binding it
             # exercises read-time relocation of absolute registered arguments.
             fixture.projects.configure(fixture.project['id'],
-                [sys.executable, '-B', 'check.py', str(old_source / 'policy.txt')])
+                [sys.executable, '-B', 'contract_eval.py', str(old_source / 'policy.txt')])
             config = ProjectConfiguration(fixture.projects)
-            runtime_command = [sys.executable, '-B', str(old_source / 'check.py'), '{workspace}']
+            runtime_command = [sys.executable, '-B', str(old_source / 'contract_eval.py'), '{workspace}']
             config.save(fixture.project['id'], dict(expected_configuration_revision=0,
                 preview_config=dict(command=runtime_command, health={'path': '/health'}),
                 deployment_profiles=[dict(id='local', command=runtime_command,
@@ -442,7 +442,7 @@ class WorkbenchMigrationTests(unittest.TestCase):
                 self.runtimes.append(runtime)
                 shutil.copytree(old_source, project)
                 restored = restore_migration(archive, runtime, {str(old_source): str(project)})
-                self.assertEqual('ready', restored['execution_environment']['status'])
+                self.assertEqual('ready', restored['execution_environment']['status'], restored['execution_environment'])
                 copies.append((runtime, project))
             # A previous host's directories really cannot satisfy any is_file or
             # is_dir check here; retained copies have different absolute paths.

@@ -80,14 +80,14 @@ class DeliveryRuntimeTests(unittest.TestCase):
         subprocess.run(['git', 'init', '-q'], cwd=self.repository, check=True)
         for name in ('a.txt', 'b.txt'):
             (self.repository / name).write_text('1')
-        (self.repository / 'check.py').write_text("import json;from pathlib import Path\n"
+        (self.repository / 'delivery_contract_eval.py').write_text("import json;from pathlib import Path\n"
             "ok=all(Path(n).read_text() in ('1','2') for n in ('a.txt','b.txt'))\n"
             "print(json.dumps({'summary':{'decision':'pass' if ok else 'block','total':1,'passed':int(ok),'blocking_failed':int(not ok)},'results':[{'name':'value','level':'blocking','passed':ok}]}))\n"
             "raise SystemExit(0 if ok else 1)\n")
         self.runtime_dir = self.root / 'runtime'
         self.tasks = TaskStore(self.runtime_dir / 'workbench.db')
         self.projects = ProjectStore(self.tasks.path)
-        self.project = self.projects.create('test', self.repository, [sys.executable, 'check.py'])
+        self.project = self.projects.create('test', self.repository, [sys.executable, 'delivery_contract_eval.py'])
         self.items = InitiativeStore(self.tasks.path)
         self.item = self.items.create({'title':'change two files', 'raw_signal':'change two files', 'source':'fixture',
                                       'project_id':self.project['id'], 'success_metric':'both values are 2'}, 'owner')
@@ -158,7 +158,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '不得并行'):
             self.prepare({'name':'b', 'prompt':'change a', 'read_set':['a.txt'], 'write_set':['b.txt']})
         with self.assertRaisesRegex(ValueError, '父事项'):
-            self.prepare({'name':'b', 'prompt':'change checks', 'write_set':['check.py']})
+            self.prepare({'name':'b', 'prompt':'change checks', 'write_set':['delivery_contract_eval.py']})
         self.assertFalse(self.runtime.workers)
 
     def test_shutdown_refuses_new_delivery_and_prepared_workers(self):
@@ -237,7 +237,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
 
     def test_four_frozen_workers_really_overlap_in_independent_cli_candidates(self):
         for name in ('c.txt','d.txt'):(self.repository/name).write_text('1')
-        (self.repository/'check.py').write_text("import json;from pathlib import Path\n"
+        (self.repository/'delivery_contract_eval.py').write_text("import json;from pathlib import Path\n"
             "ok=all(Path(n).read_text() in ('1','2') for n in ('a.txt','b.txt','c.txt','d.txt'))\n"
             "print(json.dumps({'summary':{'decision':'pass' if ok else 'block','total':1,'passed':int(ok),'blocking_failed':int(not ok)},'results':[{'name':'four-values','level':'blocking','passed':ok}]}))\n"
             "raise SystemExit(0 if ok else 1)")
@@ -351,7 +351,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
         self.assertIn('--ignore-user-config',readonly)
 
     def test_subtask_failure_retains_outputs_and_prevents_acceptance(self):
-        (self.repository / 'check.py').write_text("import json\nprint(json.dumps({'summary':{'decision':'block','total':1,'passed':0,'blocking_failed':1},'results':[{'name':'bad','level':'blocking','passed':False}]}))\nraise SystemExit(1)")
+        (self.repository / 'delivery_contract_eval.py').write_text("import json\nprint(json.dumps({'summary':{'decision':'block','total':1,'passed':0,'blocking_failed':1},'results':[{'name':'bad','level':'blocking','passed':False}]}))\nraise SystemExit(1)")
         self.plan['source_manifest'] = manifest(self.repository, self.runtime_dir)
         work = self.workflow._load(self.item['id']); work['plan'] = self.plan; self.workflow._save(work)
         self.start()
@@ -679,7 +679,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
             "print(json.dumps({'summary':{'decision':'pass' if ok else 'block','total':1,'passed':int(ok),'blocking_failed':int(not ok)},'results':[{'name':'value','level':'blocking','passed':ok}]}))\n"
             "raise SystemExit(0 if ok else 1)\n"
         )
-        (self.repository / 'check.py').write_text(check)
+        (self.repository / 'delivery_contract_eval.py').write_text(check)
         self.plan = prepare_daily(self.repository, self.runtime_dir, 'owner', 'update-a and update-b',
                                   'values are 2', ['a.txt', 'b.txt'], project=self.project)
         self.plan.update(plan_id='plan-fixture', expires_at=time.time()+900)
@@ -879,7 +879,7 @@ class DeliveryRuntimeTests(unittest.TestCase):
             self.runtime._save(settled)
         with patch('workbench.delivery_runtime.manifest', wraps=manifest) as actual_manifest:
             refreshed = self.view()
-        actual_manifest.assert_called_once_with(self.repository, self.runtime_dir)
+        actual_manifest.assert_called_once_with(self.repository, self.runtime_dir, record_process=False)
         self.assertTrue(refreshed['candidate_sha256'])
         self.assertEqual('verified', refreshed['candidate_verification'])
         self.assertEqual(action == 'pause', refreshed['can_resume'])
