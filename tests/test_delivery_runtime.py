@@ -69,6 +69,21 @@ class LocalWorker(CodexExecutionRunner):
                 with self.ready_lock:LocalWorker.active -= 1
 
 
+def wait_for_worker_usage(case, expected=None, timeout=30):
+    """Wait for actual owned-process output after bounded snapshot preparation."""
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        with LocalWorker.ready_lock:
+            ready=set(LocalWorker.ready)
+        if ready and (expected is None or ready==expected):
+            return
+        worker=case.runtime.workers.get(case.item['id']) or case.workflow.workers.get(case.item['id'])
+        if worker is not None and not worker.is_alive():
+            case.fail('owned fixture ended before its process marker: '+repr(case.runtime._load(case.item['id'])))
+        time.sleep(.02)
+    case.fail('owned fixture did not produce its actual process marker before the startup deadline')
+
+
 class DeliveryRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -364,11 +379,9 @@ class DeliveryRuntimeTests(unittest.TestCase):
     def test_pause_ends_owned_process_and_explicit_resume_checks_hash(self):
         view = self.prepare()
         with LocalWorker.ready_lock:LocalWorker.ready.clear()
-        with patch.object(LocalWorker, 'delay', 10):
+        with patch.object(LocalWorker,'completion_gate',self.root/'pause-process-gate'):
             self.runtime.start_subtasks(self.item['id'], 'owner', view['revision'], 'pause-key', view['subtask_plan_id'])
-            deadline = time.time()+5
-            while LocalWorker.ready != {'a.txt','b.txt'} and time.time()<deadline:
-                time.sleep(.01)
+            wait_for_worker_usage(self,{'a.txt','b.txt'})
             self.assertEqual({'a.txt','b.txt'},LocalWorker.ready)
             current = self.view()
             self.runtime.control(self.item['id'], 'pause', 'owner', current['revision'],
@@ -967,9 +980,9 @@ class DeliveryRuntimeTests(unittest.TestCase):
     def test_shared_session_pause_controls_the_actual_cli_run(self):
         api=self.shared_api()
         with LocalWorker.ready_lock:LocalWorker.ready.clear()
-        with patch.object(LocalWorker,'delay',10):
-            self.start(); deadline=time.time()+5
-            while LocalWorker.ready != {'a.txt','b.txt'} and time.time()<deadline:time.sleep(.01)
+        with patch.object(LocalWorker,'completion_gate',self.root/'session-pause-process-gate'):
+            self.start()
+            wait_for_worker_usage(self,{'a.txt','b.txt'})
             self.assertEqual({'a.txt','b.txt'},LocalWorker.ready)
             current=self.view()
             with self.runtime.lock:
