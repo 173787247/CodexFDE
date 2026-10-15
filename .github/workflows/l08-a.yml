@@ -1,0 +1,128 @@
+# L08 阶段 A：假绿（false green）。
+#
+# 受控对照的起点。三段只允许各自改一处：
+#   A（本文件）  适配器吞掉 Harness 的失败 -> Job 绿，业务红
+#   B            只去掉吞失败的那一下    -> Job 红，业务仍红
+#   C            只换产品 SHA 到修复版    -> 两层都绿
+#
+# A 与 B 的业务代码、检查、用例选择完全相同；B 与 C 的工作流完全相同。
+# 依据：实践操作手册 L08 §5「先为 A 准备单独的演示工作流」与 §6.1~§6.3。
+#
+# 产品版本来自课程仓库 Actions variables：
+#   L08_FLOWERP_REPOSITORY  形如 owner/repository
+#   L08_FLOWERP_SHA         完整 40 位提交 SHA
+name: L08 A Candidate Eval
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - l08-a
+
+permissions:
+  contents: read
+
+jobs:
+  blocking-evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CI_REPORT_DIR: _ci_reports/${{ github.run_id }}-${{ github.run_attempt }}
+      FLOWERP_PROJECT_ROOT: ${{ github.workspace }}/_projects/flowERP
+      L08_PRODUCT_REPOSITORY: ${{ vars.L08_FLOWERP_REPOSITORY }}
+      L08_PRODUCT_SHA: ${{ vars.L08_FLOWERP_SHA }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require a fixed independent product source
+        shell: bash
+        run: |
+          [[ "$L08_PRODUCT_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || { echo 'Set L08_FLOWERP_REPOSITORY to owner/repository'; exit 1; }
+          [[ "$L08_PRODUCT_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'Set L08_FLOWERP_SHA to the full product commit SHA'; exit 1; }
+          echo "product repository: $L08_PRODUCT_REPOSITORY"
+          echo "product sha:        $L08_PRODUCT_SHA"
+
+      - name: Checkout the frozen FlowERP candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.L08_FLOWERP_REPOSITORY }}
+          ref: ${{ vars.L08_FLOWERP_SHA }}
+          path: _projects/flowERP
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare both project environments
+        id: environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+          python -m venv "$FLOWERP_PROJECT_ROOT/.venv"
+          "$FLOWERP_PROJECT_ROOT/.venv/bin/python" -m pip install -e "$FLOWERP_PROJECT_ROOT"
+          .venv/bin/python -X utf8 -m workbench.cli environment-check --product
+          actual_product_sha="$(git -C "$FLOWERP_PROJECT_ROOT" rev-parse HEAD)"
+          [[ "${actual_product_sha,,}" == "${L08_PRODUCT_SHA,,}" ]]
+
+      - name: Record both versions and loaded check sources
+        id: sources
+        shell: bash
+        run: |
+          mkdir -p "$CI_REPORT_DIR"
+          {
+            printf 'course_sha='; git rev-parse HEAD
+            printf 'product_repository=%s\n' "$L08_PRODUCT_REPOSITORY"
+            printf 'product_sha='; git -C "$FLOWERP_PROJECT_ROOT" rev-parse HEAD
+            sha256sum eval/harness.py eval/cases.py
+            .venv/bin/python -c 'import eval.harness; print("course_harness=" + eval.harness.__file__)'
+            (
+              cd "$FLOWERP_PROJECT_ROOT"
+              .venv/bin/python -c 'import flowerp.service; print("product_service=" + flowerp.service.__file__)'
+              if [[ -f eval/erp_cases.py ]]; then sha256sum eval/erp_cases.py; else sha256sum eval/cases.py; fi
+            )
+          } > "$CI_REPORT_DIR/source-versions.txt"
+          cat "$CI_REPORT_DIR/source-versions.txt"
+
+      - name: Unit tests
+        run: .venv/bin/python -X utf8 -m unittest discover -s tests -v
+
+      - name: Workbench blocking gate
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' && steps.sources.outcome == 'success' }}
+        run: .venv/bin/python -X utf8 -m eval.harness --suite blocking --no-report
+
+      # 默认阻断门不执行产品用例（harness 会用 PROJECT_CASES 过滤掉它们），
+      # 所以本讲冻结的业务检查必须逐个 --case 显式列出。
+      - name: Explicit frozen business gate
+        id: business
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' && steps.sources.outcome == 'success' }}
+        run: |
+          # ⚠️ A 阶段的训练用缺陷在这一行：`|| true` 让适配器吞掉 Harness 的失败，
+          # 于是 Job 变绿而业务仍是红的。B 阶段只去掉这一段，别的一字不改。
+          .venv/bin/python -X utf8 -m eval.harness --suite blocking \
+            --case sales_credit_and_atomic_reservation \
+            --case stock_never_negative \
+            --report-path "$CI_REPORT_DIR/harness-blocking.json" || true
+          echo "business_step_conclusion=$?" >> "$CI_REPORT_DIR/step-conclusions.txt"
+
+      - name: Bind report identity
+        if: ${{ always() && steps.environment.outcome == 'success' && steps.sources.outcome == 'success' && steps.business.outcome == 'success' }}
+        run: |
+          .venv/bin/python -X utf8 -m workbench.ci_evidence \
+            --report "$CI_REPORT_DIR/harness-blocking.json" \
+            --output "$CI_REPORT_DIR/ci-evidence.json"
+
+      - name: Upload this attempt's evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l08-a-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CI_REPORT_DIR }}/harness-blocking.json
+            ${{ env.CI_REPORT_DIR }}/ci-evidence.json
+            ${{ env.CI_REPORT_DIR }}/source-versions.txt
+            ${{ env.CI_REPORT_DIR }}/step-conclusions.txt
+          if-no-files-found: warn
