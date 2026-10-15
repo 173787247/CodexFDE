@@ -468,6 +468,11 @@ def payable_aging_tracks_open_supplier_exposure():
     from workbench.external_project import evaluate_case
     return evaluate_case('payable_aging_tracks_open_supplier_exposure')
 
+def ar_aging_export_keeps_columns():
+    from workbench.external_project import evaluate_case
+    return evaluate_case('ar_aging_export_keeps_columns')
+
+
 def double_entry_fifo_and_subledger_reconciliation():
     from workbench.external_project import evaluate_case
     return evaluate_case('double_entry_fifo_and_subledger_reconciliation')
