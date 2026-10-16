@@ -389,6 +389,26 @@ python -X utf8 -m workbench.feedback summary
 
 修改业务规则时，至少补一个正常路径和一个失败路径；修改课程内容时，必须同时核对课程大纲、详细讲义和任务卡。
 
+### ERP 业务检查是委托执行的
+
+ERP 业务源码在独立客户项目里，本仓库不保留 `flowerp` 包；**ERP 业务 Eval 在客户仓库中执行，本仓库的显式用例通过进程边界委托**。所以上面那条 `--suite blocking` 跑的是本仓库自己的检查，**业务检查必须显式点名**：
+
+```bash
+# 先让本仓库知道产品源码在哪
+export FLOWERP_PROJECT_ROOT=/path/to/flowERP
+
+# 点名跑一条业务检查（它会在客户仓库里另起进程执行断言）
+python -X utf8 -m eval.harness --suite blocking --case ar_aging_export_keeps_columns
+
+# 把全部业务检查一起跑
+python -X utf8 -m eval.harness --suite blocking $(python -X utf8 -c \
+  "import eval.harness as h; print(' '.join('--case '+n for n in sorted(h.PROJECT_CASES)))")
+```
+
+**这一条容易看错**：`eval/harness.py` 在没有显式 `--case` 时会把 `PROJECT_CASES` 从批次里过滤掉，所以加了一条业务检查之后，`--suite all` 的总数不会变——那不是「没生效」，是没点名。要确认一条业务检查真的跑过，看它的 `detail`：委托成功的记录里会写明**客户仓库根路径**、**用例名**、**子进程退出码**和它返回的结论。
+
+写一条业务检查要动两处：客户仓库的 `eval/cases.py` 里写断言并在它的 `eval/harness.py` 注册；本仓库的 `eval/cases.py` 里加一个 `evaluate_case(...)` 包装，并在 `eval/harness.py` 的 `PROJECT_CASES` 与 `EVALS` 各登记一次。
+
 ### 不可破坏的业务规则
 
 1. 可用库存不得为负；预占必须原子化。
